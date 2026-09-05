@@ -26,6 +26,7 @@ from gradio_client import Client, handle_file
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".webapp"
 JOBS_DIR = STATE_DIR / "jobs"
+VOICES_DIR = STATE_DIR / "voices"
 CONFIG_PATH = STATE_DIR / "config.json"
 PREFERENCES_PATH = STATE_DIR / "preferences.json"
 PYTHON = Path(sys.executable)
@@ -47,6 +48,7 @@ DEFAULT_CONFIG = {
     "tts_url": "http://127.0.0.1:7860",
     "tts_url_2": "",
     "tts_mode": "gradio",
+    "output_dir": "",
 }
 
 DEFAULT_STYLE = "极简粗线简笔白板风"
@@ -227,6 +229,7 @@ app.add_middleware(
 )
 
 JOBS: dict[str, dict[str, Any]] = {}
+DELETED_JOB_IDS: set[str] = set()
 LOCK = threading.Lock()
 VOICE_QUEUE: queue.Queue[tuple[Any, ...]] = queue.Queue()
 MODEL_QUEUE: queue.Queue[tuple[Any, ...]] = queue.Queue()
@@ -241,6 +244,9 @@ RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 RUNNING_PROCESSES_LOCK = threading.Lock()
 MODEL_CONCURRENCY = 4
 MAX_ACTIVE_AND_QUEUED = 20
+VOICE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".webm"}
+VOICE_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
+VOICE_LIBRARY_LOCK = threading.Lock()
 
 
 class JobCancelled(RuntimeError):
@@ -249,7 +255,7 @@ class JobCancelled(RuntimeError):
 
 def is_job_cancelled(job_id: str) -> bool:
     with LOCK:
-        return JOBS.get(job_id, {}).get("status") == "cancelled"
+        return job_id in DELETED_JOB_IDS or JOBS.get(job_id, {}).get("status") == "cancelled"
 
 
 def ensure_job_active(job_id: str) -> None:
@@ -363,6 +369,10 @@ def load_config() -> dict[str, Any]:
         data["text_model"] = DEFAULT_CONFIG["text_model"]
     if str(data.get("image_model", "")).startswith("doubao-"):
         data["image_model"] = DEFAULT_CONFIG["image_model"]
+    try:
+        data["output_dir"] = normalize_output_dir(data.get("output_dir", ""))
+    except (ValueError, OSError):
+        data["output_dir"] = ""
     return data
 
 
@@ -372,6 +382,109 @@ def safe_config(data: dict[str, Any]) -> dict[str, Any]:
     result["api_key"] = "" if not key else f"{key[:4]}••••{key[-4:]}"
     result["has_api_key"] = bool(key)
     return result
+
+
+def normalize_output_dir(value: Any, *, create: bool = False) -> str:
+    raw = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
+    if not raw:
+        return ""
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ValueError("视频输出目录必须使用绝对路径")
+    path = path.resolve()
+    jobs_root = JOBS_DIR.resolve()
+    if path == jobs_root or jobs_root in path.parents:
+        raise ValueError("视频输出目录不能放在任务历史目录内")
+    if path.exists() and not path.is_dir():
+        raise ValueError("视频输出目录已存在但不是文件夹")
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def export_final_video(job_id: str, source: Path) -> str | None:
+    output_dir = normalize_output_dir(load_config().get("output_dir", ""), create=True)
+    if not output_dir:
+        return None
+    target = Path(output_dir) / f"whiteboard-{job_id}.mp4"
+    temporary = target.with_name(f".{target.name}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return str(target)
+
+
+def recorded_output_path(item: dict[str, Any], job_id: str) -> Path | None:
+    raw = str(item.get("output_path") or "")
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or path.name != f"whiteboard-{job_id}.mp4":
+        return None
+    return path
+
+
+def normalized_voice_name(value: Any, fallback: str = "") -> str:
+    name = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not name:
+        name = re.sub(r"[_-]+", " ", Path(fallback).stem).strip()
+    return name[:30] or "未命名音色"
+
+
+def voice_metadata_path(voice_id: str) -> Path:
+    return VOICES_DIR / voice_id / "voice.json"
+
+
+def voice_snapshot(metadata: dict[str, Any], audio_path: Path) -> dict[str, Any]:
+    return {
+        "id": str(metadata.get("id") or audio_path.parent.name),
+        "name": normalized_voice_name(metadata.get("name"), audio_path.name),
+        "filename": audio_path.name,
+        "content_type": mimetypes.guess_type(audio_path.name)[0] or "audio/wav",
+        "size": audio_path.stat().st_size,
+        "created_at": float(metadata.get("created_at", 0)),
+    }
+
+
+def list_voice_snapshots() -> list[dict[str, Any]]:
+    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    items: list[dict[str, Any]] = []
+    with VOICE_LIBRARY_LOCK:
+        for metadata_path in VOICES_DIR.glob("*/voice.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                voice_id = str(metadata.get("id") or metadata_path.parent.name)
+                if not VOICE_ID_PATTERN.fullmatch(voice_id):
+                    continue
+                filename = str(metadata.get("filename") or "")
+                if Path(filename).name != filename:
+                    continue
+                audio_path = metadata_path.parent / filename
+                if not audio_path.is_file():
+                    continue
+                items.append(voice_snapshot(metadata, audio_path))
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                continue
+    return sorted(items, key=lambda item: (float(item.get("created_at", 0)), str(item.get("id", ""))), reverse=True)
+
+
+def voice_record(voice_id: str) -> tuple[dict[str, Any], Path]:
+    if not VOICE_ID_PATTERN.fullmatch(voice_id):
+        raise HTTPException(404, "音色不存在")
+    metadata_path = voice_metadata_path(voice_id)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(404, "音色不存在") from exc
+    filename = str(metadata.get("filename") or "")
+    if Path(filename).name != filename or Path(filename).suffix.lower() not in VOICE_AUDIO_SUFFIXES:
+        raise HTTPException(404, "音色文件无效")
+    audio_path = metadata_path.parent / filename
+    if not audio_path.is_file():
+        raise HTTPException(404, "音色文件不存在")
+    return metadata, audio_path
 
 
 def configured_tts_nodes(config: dict[str, Any] | None = None) -> list[str]:
@@ -408,6 +521,8 @@ def request_client_ip(request: Request) -> str:
 
 def update_job(job_id: str, **values: Any) -> None:
     with LOCK:
+        if job_id not in JOBS:
+            return
         if JOBS[job_id].get("status") == "cancelled" and values.get("status") != "cancelled":
             return
         JOBS[job_id].update(values)
@@ -417,6 +532,8 @@ def update_job(job_id: str, **values: Any) -> None:
 def begin_phase(job_id: str, key: str, label: str, stage: str, progress: int) -> None:
     now = time.time()
     with LOCK:
+        if job_id not in JOBS:
+            raise JobCancelled("任务已删除")
         job = JOBS[job_id]
         if job.get("status") == "cancelled":
             raise JobCancelled("任务已取消")
@@ -438,6 +555,8 @@ def queue_for_stage(job_id: str, queue_stage: str, stage: str, progress: int) ->
     """Close the active timer and move a job to the next pipeline queue."""
     now = time.time()
     with LOCK:
+        if job_id not in JOBS:
+            raise JobCancelled("任务已删除")
         job = JOBS[job_id]
         if job.get("status") == "cancelled":
             raise JobCancelled("任务已取消")
@@ -457,6 +576,8 @@ def queue_for_stage(job_id: str, queue_stage: str, stage: str, progress: int) ->
 def finish_timing(job_id: str) -> None:
     now = time.time()
     with LOCK:
+        if job_id not in JOBS:
+            return
         job = JOBS[job_id]
         current = job.get("current_phase")
         started = job.get("phase_started_at")
@@ -1284,8 +1405,24 @@ def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, t
     # Long-form cloning can keep the GPU busy for several minutes.  The
     # default Gradio HTTP read timeout is too short and abandons a healthy job.
     client = Client(config["tts_url"], verbose=False, httpx_kwargs={"timeout": 1800.0})
+    emotion_control_method = "Same as the voice reference"
+    try:
+        api_info = client.view_api(return_format="dict", print_info=False)
+        endpoint = api_info.get("named_endpoints", {}).get("/gen_single", {})
+        parameter = (endpoint.get("parameters") or [])[0]
+        choices = parameter.get("type", {}).get("enum") or []
+        candidates = [
+            parameter.get("parameter_default"),
+            parameter.get("example_input"),
+            choices[0] if choices else None,
+        ]
+        emotion_control_method = next(
+            value for value in candidates if isinstance(value, str) and value
+        )
+    except (AttributeError, IndexError, KeyError, StopIteration, TypeError, ValueError):
+        pass
     job = client.submit(
-        "Same as the voice reference", handle_file(str(reference)), copy, "ZH", None, 0.65,
+        emotion_control_method, handle_file(str(reference)), copy, "ZH", None, 0.65,
         0, 0, 0, 0, 0, 0, 0, 0, "", False, 120, 1.0,
         True, 0.8, 30, 0.8, 0.0, 3, 10.0, 1500,
         api_name="/gen_single",
@@ -1961,8 +2098,9 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
             if not valid_media_file(partial_final):
                 raise RuntimeError("最终音画文件无效")
             partial_final.replace(final)
+        output_path = export_final_video(job_id, final)
         finish_timing(job_id)
-        update_job(job_id, status="done", stage="制作完成", progress=100, result_url=f"/api/jobs/{job_id}/download", result_file=final.name, duration=duration, scenes=len(scenes), boards=len(boards), can_rerender=True)
+        update_job(job_id, status="done", stage="制作完成", progress=100, result_url=f"/api/jobs/{job_id}/download", result_file=final.name, output_path=output_path, duration=duration, scenes=len(scenes), boards=len(boards), can_rerender=True)
     except Exception as exc:
         fail_job(job_id, "本地渲染失败", exc)
 
@@ -2039,8 +2177,9 @@ def rerender_job(job_id: str, scenes_per_image: int, pen_text: str, include_key_
             if not valid_media_file(partial_final):
                 raise RuntimeError("重新渲染的最终音画文件无效")
             partial_final.replace(final)
+        output_path = export_final_video(job_id, final)
         finish_timing(job_id)
-        update_job(job_id, status="done", stage="重新渲染完成", progress=100, result_url=f"/api/jobs/{job_id}/download", duration=duration, scenes=len(scenes), boards=len(boards), can_rerender=True)
+        update_job(job_id, status="done", stage="重新渲染完成", progress=100, result_url=f"/api/jobs/{job_id}/download", result_file=final.name, output_path=output_path, duration=duration, scenes=len(scenes), boards=len(boards), can_rerender=True)
     except Exception as exc:
         fail_job(job_id, "重新渲染失败", exc)
 
@@ -2254,6 +2393,8 @@ def enqueue_job_from_checkpoint(job_id: str, item: dict[str, Any]) -> None:
     if result_name not in {"final.mp4", "final-remotion-v1.mp4"}:
         result_name = "final.mp4"
     if valid_media_file(job_dir / result_name):
+        recorded_path = recorded_output_path(item, job_id)
+        output_path = str(recorded_path) if recorded_path and recorded_path.is_file() else export_final_video(job_id, job_dir / result_name)
         finish_timing(job_id)
         update_job(
             job_id,
@@ -2262,6 +2403,7 @@ def enqueue_job_from_checkpoint(job_id: str, item: dict[str, Any]) -> None:
             progress=100,
             result_url=f"/api/jobs/{job_id}/download",
             result_file=result_name,
+            output_path=output_path,
             can_rerender=True,
         )
         return
@@ -2346,7 +2488,13 @@ def save_config(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(key)
         if key == "api_key" and isinstance(value, str) and "••••" in value:
             continue
-        if key == "tts_url_2" and isinstance(value, str):
+        if key in {"tts_url_2", "output_dir"} and isinstance(value, str):
+            if key == "output_dir":
+                try:
+                    current[key] = normalize_output_dir(value, create=True)
+                except (ValueError, OSError) as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                continue
             current[key] = value.strip()
             continue
         if value not in (None, ""):
@@ -2420,6 +2568,78 @@ def save_preferences(payload: dict[str, Any]) -> dict[str, Any]:
     return preferences
 
 
+@app.get("/api/voices")
+def list_voices() -> dict[str, Any]:
+    return {"items": list_voice_snapshots()}
+
+
+@app.post("/api/voices")
+async def create_voice(name: str = Form(""), audio: UploadFile = File(...)) -> dict[str, Any]:
+    suffix = Path(audio.filename or "reference.wav").suffix.lower() or ".wav"
+    if suffix not in VOICE_AUDIO_SUFFIXES:
+        raise HTTPException(400, "音色只支持 WAV、MP3、M4A、AAC、FLAC、OGG 或 WebM")
+    voice_id = uuid.uuid4().hex[:12]
+    voice_dir = VOICES_DIR / voice_id
+    audio_path = voice_dir / f"reference{suffix}"
+    try:
+        voice_dir.mkdir(parents=True, exist_ok=False)
+        with audio_path.open("wb") as target:
+            shutil.copyfileobj(audio.file, target)
+        if audio_path.stat().st_size > 100 * 1024 * 1024 or not valid_media_file(audio_path):
+            raise HTTPException(400, "音色文件无效或超过 100MB")
+        metadata = {
+            "id": voice_id,
+            "name": normalized_voice_name(name, audio.filename or ""),
+            "filename": audio_path.name,
+            "created_at": time.time(),
+        }
+        atomic_write_json(voice_dir / "voice.json", metadata)
+        return voice_snapshot(metadata, audio_path)
+    except HTTPException:
+        shutil.rmtree(voice_dir, ignore_errors=True)
+        raise
+    except (OSError, ValueError) as exc:
+        shutil.rmtree(voice_dir, ignore_errors=True)
+        raise HTTPException(500, f"保存音色失败：{exc}") from exc
+
+
+@app.patch("/api/voices/{voice_id}")
+def rename_voice(voice_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    metadata, audio_path = voice_record(voice_id)
+    name = normalized_voice_name(payload.get("name"), "")
+    if name == "未命名音色" and not str(payload.get("name") or "").strip():
+        raise HTTPException(400, "音色名称不能为空")
+    metadata["name"] = name
+    try:
+        atomic_write_json(voice_metadata_path(voice_id), metadata)
+    except OSError as exc:
+        raise HTTPException(500, f"重命名音色失败：{exc}") from exc
+    return voice_snapshot(metadata, audio_path)
+
+
+@app.delete("/api/voices/{voice_id}")
+def delete_voice(voice_id: str) -> dict[str, Any]:
+    voice_record(voice_id)
+    voice_dir = (VOICES_DIR / voice_id).resolve()
+    if voice_dir.parent != VOICES_DIR.resolve():
+        raise HTTPException(404, "音色不存在")
+    try:
+        shutil.rmtree(voice_dir)
+    except OSError as exc:
+        raise HTTPException(500, f"删除音色失败：{exc}") from exc
+    return {"id": voice_id, "deleted": True}
+
+
+@app.get("/api/voices/{voice_id}/audio")
+def get_voice_audio(voice_id: str) -> FileResponse:
+    metadata, audio_path = voice_record(voice_id)
+    return FileResponse(
+        audio_path,
+        media_type=mimetypes.guess_type(audio_path.name)[0] or "audio/wav",
+        filename=str(metadata.get("filename") or audio_path.name),
+    )
+
+
 @app.post("/api/jobs")
 async def create_job(
     request: Request,
@@ -2431,7 +2651,8 @@ async def create_job(
     include_key_text: bool = Form(True),
     include_subtitles: bool = Form(True),
     stroke_detail: str = Form("detailed"),
-    reference: UploadFile = File(...),
+    reference: UploadFile | None = File(None),
+    voice_id: str = Form(""),
     reference_mode: str = Form("standard"),
     character_manifest: str = Form("[]"),
     style_reference: UploadFile | None = File(None),
@@ -2443,13 +2664,25 @@ async def create_job(
         pending = sum(1 for item in JOBS.values() if item.get("status") in {"queued", "running"})
     if pending >= MAX_ACTIVE_AND_QUEUED:
         raise HTTPException(429, f"当前已有 {pending} 个任务，请稍后再提交")
+    selected_voice_id = voice_id.strip()
+    selected_voice_metadata: dict[str, Any] | None = None
+    selected_voice_path: Path | None = None
+    if selected_voice_id:
+        selected_voice_metadata, selected_voice_path = voice_record(selected_voice_id)
+    if reference is None and selected_voice_path is None:
+        raise HTTPException(400, "请上传参考音频或从音色库选择音色")
     job_id = uuid.uuid4().hex[:12]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(reference.filename or "reference.wav").suffix or ".wav"
-    reference_path = job_dir / f"reference{suffix}"
-    with reference_path.open("wb") as target:
-        shutil.copyfileobj(reference.file, target)
+    if reference is not None:
+        suffix = Path(reference.filename or "reference.wav").suffix or ".wav"
+        reference_path = job_dir / f"reference{suffix}"
+        with reference_path.open("wb") as target:
+            shutil.copyfileobj(reference.file, target)
+    else:
+        suffix = selected_voice_path.suffix or ".wav"
+        reference_path = job_dir / f"reference{suffix}"
+        shutil.copy2(selected_voice_path, reference_path)
     reference_mode = reference_mode if reference_mode in {"custom", "infographic"} else "standard"
     visual_references: dict[str, Any] = {}
     if reference_mode == "custom":
@@ -2524,6 +2757,7 @@ async def create_job(
             "job_type": "infographic" if reference_mode == "infographic" else "generate", "style": style, "scenes_per_image": scenes_per_image,
             "pipeline_version": PIPELINE_VERSION if reference_mode == "infographic" else "standard_v1",
             "reference_mode": reference_mode, "character_count": len(visual_references.get("characters", [])),
+            "voice_id": selected_voice_id, "voice_name": str((selected_voice_metadata or {}).get("name") or ""),
             "visual_references": visual_references,
             "task_name": task_name,
             "copy": script.strip(),
@@ -2543,6 +2777,44 @@ def list_jobs(limit: int = 20) -> dict[str, Any]:
     with LOCK:
         ids = sorted(JOBS, key=lambda item: float(JOBS[item].get("created_at", 0)), reverse=True)[:max(1, min(100, limit))]
     return {"items": [job_snapshot(job_id) for job_id in ids]}
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        raise HTTPException(404, "历史任务不存在")
+    job_dir = (JOBS_DIR / job_id).resolve()
+    if job_dir.parent != JOBS_DIR.resolve():
+        raise HTTPException(404, "历史任务不存在")
+    terminate_running_process(job_id)
+    with RUNNING_PROCESSES_LOCK:
+        process = RUNNING_PROCESSES.get(job_id)
+        if process is not None and process.poll() is None:
+            raise HTTPException(409, "任务仍在停止，请稍后再删除")
+    with LOCK:
+        item = JOBS.get(job_id)
+        if item is None:
+            raise HTTPException(404, "历史任务不存在")
+        if item.get("status") in {"queued", "running"}:
+            raise HTTPException(400, "排队中或制作中的任务请先取消")
+        output_path = recorded_output_path(item, job_id)
+        DELETED_JOB_IDS.add(job_id)
+        del JOBS[job_id]
+    try:
+        if job_dir.exists():
+            shutil.rmtree(job_dir)
+    except OSError as exc:
+        with LOCK:
+            JOBS[job_id] = item
+            DELETED_JOB_IDS.discard(job_id)
+        raise HTTPException(500, f"删除历史文件失败：{exc}") from exc
+    output_deleted = True
+    if output_path is not None:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            output_deleted = False
+    return {"id": job_id, "deleted": True, "output_deleted": output_deleted}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -2854,7 +3126,9 @@ def download_job(job_id: str) -> FileResponse:
     result_name = str(item.get("result_file") or "final.mp4")
     if result_name not in {"final.mp4", "final-remotion-v1.mp4"}:
         raise HTTPException(404, "视频文件记录无效")
-    path = JOBS_DIR / job_id / result_name
-    if not path.exists():
+    path = recorded_output_path(item, job_id)
+    if path is None or not path.is_file():
+        path = JOBS_DIR / job_id / result_name
+    if not path.is_file():
         raise HTTPException(404, "视频尚未生成")
     return FileResponse(path, media_type="video/mp4", filename=f"whiteboard-{job_id}.mp4")

@@ -1,3 +1,5 @@
+import asyncio
+import io
 import importlib.util
 import json
 import queue
@@ -200,6 +202,39 @@ class QueueResumeTests(unittest.TestCase):
 
         self.assertEqual(SERVER.VOICE_QUEUE.qsize(), 0)
         self.assertEqual(SERVER.MODEL_QUEUE.qsize(), 1)
+
+
+class VoiceLibraryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.original_voices_dir = SERVER.VOICES_DIR
+        SERVER.VOICES_DIR = Path(self.temporary.name) / "voices"
+        self.media_patch = mock.patch.object(SERVER, "valid_media_file", return_value=True)
+        self.media_patch.start()
+
+    def tearDown(self) -> None:
+        self.media_patch.stop()
+        SERVER.VOICES_DIR = self.original_voices_dir
+        self.temporary.cleanup()
+
+    def test_voice_library_crud(self) -> None:
+        upload = SERVER.UploadFile(file=io.BytesIO(b"test audio"), filename="sample.wav")
+        created = asyncio.run(SERVER.create_voice("  我的   音色  ", upload))
+
+        self.assertEqual(created["name"], "我的 音色")
+        self.assertEqual(SERVER.list_voices()["items"][0]["id"], created["id"])
+        metadata, audio_path = SERVER.voice_record(created["id"])
+        self.assertEqual(metadata["filename"], "reference.wav")
+        self.assertEqual(audio_path.read_bytes(), b"test audio")
+
+        renamed = SERVER.rename_voice(created["id"], {"name": "旁白音色"})
+        self.assertEqual(renamed["name"], "旁白音色")
+        self.assertEqual(Path(SERVER.get_voice_audio(created["id"]).path).name, "reference.wav")
+
+        self.assertEqual(SERVER.delete_voice(created["id"])["deleted"], True)
+        self.assertEqual(SERVER.list_voices()["items"], [])
+        with self.assertRaises(SERVER.HTTPException):
+            SERVER.voice_record(created["id"])
 
 
 if __name__ == "__main__":

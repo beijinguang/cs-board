@@ -393,6 +393,13 @@
   white-space: nowrap;
 }
 
+.outputDirField small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 .historyPanel {
   margin-top: 22px;
   padding: 22px 24px;
@@ -530,6 +537,18 @@
   border: 1px solid #e3a18e;
   background: #fff4ef;
   color: var(--red);
+}
+
+.historyList button.deleteHistory {
+  border: 1px solid #d7b1a8;
+  background: #fff8f5;
+  color: #9b3522;
+}
+
+.historyList button.editHistory {
+  border: 1px solid var(--line);
+  background: #fffdf7;
+  color: var(--ink);
 }
 
 .cancelButton {
@@ -908,6 +927,204 @@
   background: #100d09e8;
 }
 
+.voicePickerPanel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.voicePickerHeading,
+.voiceLibraryHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.voicePickerHeading strong,
+.voiceLibraryHeading strong {
+  font-size: 13px;
+}
+
+.voicePickerHeading span,
+.voiceLibraryHeading span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.voiceSourceTabs {
+  display: flex;
+  gap: 7px;
+}
+
+.voiceSourceTabs button {
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #eee5d6;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.voiceSourceTabs button.active {
+  border-color: var(--red);
+  background: #fff4ef;
+  color: var(--red);
+}
+
+.voiceLibrarySelect {
+  display: grid;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid #c9d8c8;
+  border-radius: 12px;
+  background: #f4faf2;
+}
+
+.voiceLibrarySelect label,
+.voiceLibraryAdd label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.selectedVoiceMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.selectedVoiceMeta strong {
+  font-size: 12px;
+}
+
+.selectedVoiceMeta span,
+.voiceLoading {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.voiceLibrarySelect audio {
+  width: 100%;
+  height: 36px;
+}
+
+.voiceLibraryEmpty {
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  border: 1px dashed #c6baa3;
+  border-radius: 11px;
+  background: #fffdf7;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.voiceLibraryEmpty strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.voiceLibraryPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.voiceLibraryAdd {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.voiceLibraryAdd input[type="file"] {
+  padding: 9px;
+}
+
+.voiceLibraryAdd small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceLibraryList {
+  display: grid;
+  gap: 8px;
+}
+
+.voiceLibraryList article {
+  display: grid;
+  grid-template-columns: minmax(120px, .8fr) minmax(220px, 1.4fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffdf7;
+}
+
+.voiceLibraryList article > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.voiceLibraryList article strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceLibraryList article span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceLibraryList audio {
+  width: 100%;
+  height: 34px;
+}
+
+.voiceLibraryList article > div:last-child {
+  display: flex;
+  gap: 6px;
+}
+
+.voiceLibraryList article button {
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.voiceLibraryList article button.editHistory {
+  border: 1px solid var(--line);
+  background: #fffdf7;
+  color: var(--ink);
+}
+
+.voiceLibraryList article button.deleteHistory {
+  border: 1px solid #d7b1a8;
+  background: #fff8f5;
+  color: #9b3522;
+}
+
+.voiceLibraryList article button:disabled {
+  cursor: wait;
+  opacity: .45;
+}
+
 .audioPreview {
   display: grid;
   grid-template-columns: minmax(150px, .55fr) minmax(260px, 1.45fr);
@@ -1213,6 +1430,16 @@
 }
 
 @media (max-width: 760px) {
+  .voiceLibraryAdd,
+  .voiceLibraryList article {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .voiceLibraryList article > div:last-child {
+    justify-content: flex-end;
+  }
+
   .audioPreview {
     grid-template-columns: 1fr;
   }
