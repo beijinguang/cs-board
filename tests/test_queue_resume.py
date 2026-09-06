@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 from unittest import mock
 
+from PIL import Image
 from starlette.requests import Request
 
 
@@ -25,12 +26,18 @@ class QueueResumeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         SERVER.JOBS_DIR = Path(self.temporary.name)
+        self.original_styles_dir = SERVER.STYLES_DIR
+        self.original_styles_path = SERVER.STYLES_PATH
+        SERVER.STYLES_DIR = Path(self.temporary.name) / "styles"
+        SERVER.STYLES_PATH = Path(self.temporary.name) / "styles.json"
         SERVER.JOBS = {}
         SERVER.VOICE_QUEUE = queue.Queue()
         SERVER.MODEL_QUEUE = queue.Queue()
         SERVER.ensure_pipeline_workers = lambda: None
 
     def tearDown(self) -> None:
+        SERVER.STYLES_DIR = self.original_styles_dir
+        SERVER.STYLES_PATH = self.original_styles_path
         self.temporary.cleanup()
 
     def job(self, job_id: str) -> dict:
@@ -60,6 +67,40 @@ class QueueResumeTests(unittest.TestCase):
 
     def test_explicit_task_name_is_preserved(self) -> None:
         self.assertEqual(SERVER.normalized_task_name("  我的任务  ", "备用文案", "job-test"), "我的任务")
+
+    def test_aspect_ratio_specs_are_normalized_and_prompted(self) -> None:
+        self.assertEqual(SERVER.normalize_aspect_ratio("9:16"), "9:16")
+        self.assertEqual(SERVER.normalize_aspect_ratio("4:3"), "16:9")
+        prompt = SERVER.build_board_prompt(
+            [{"title": "竖屏", "concept": "测试", "elements": ["主体"], "text": "测试文案。"}],
+            SERVER.DEFAULT_STYLE,
+            aspect_ratio="9:16",
+        )
+        self.assertIn("9:16", prompt)
+
+    def test_fit_image_to_aspect_uses_exact_canvas_dimensions(self) -> None:
+        image_path = Path(self.temporary.name) / "source.png"
+        Image.new("RGB", (1536, 1024), (255, 255, 255)).save(image_path)
+
+        SERVER.fit_image_to_aspect(image_path, "9:16")
+
+        with Image.open(image_path) as image:
+            self.assertEqual(image.size, (864, 1536))
+
+    def test_remotion_props_use_selected_canvas_dimensions(self) -> None:
+        scenes = [{
+            "start_frame": 0,
+            "end_frame": 30,
+            "timed_cues": [{
+                "id": "cue-1", "anchor_text": "测试", "start_frame": 0, "end_frame": 30,
+                "spoken_start_ms": 0, "spoken_end_ms": 1000, "enter_ids": ["node-1"],
+                "focus_id": "node-1", "alignment_coverage": 1.0, "alignment_confidence": 1.0,
+            }],
+        }]
+
+        props = SERVER.remotion_infographic_props(scenes, SERVER.INFOGRAPHIC_STYLE, 1000, aspect_ratio="1:1")
+
+        self.assertEqual((props["width"], props["height"]), (1024, 1024))
 
     def test_custom_reference_prompt_replaces_default_character(self) -> None:
         prompt = SERVER.build_board_prompt(
@@ -92,6 +133,45 @@ class QueueResumeTests(unittest.TestCase):
     def test_unknown_style_never_silently_falls_back(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "后台未加载画面风格"):
             SERVER.style_recipe("不存在的风格")
+
+    def test_custom_style_recipe_is_persisted_and_supports_renamed_alias(self) -> None:
+        SERVER.save_custom_styles([{
+            "id": "custom-style-1",
+            "name": "我的胶片风",
+            "aliases": ["旧胶片风"],
+            "description": "暖色颗粒",
+            "recipe": "暖色胶片颗粒，深色墨线，低饱和配色。",
+            "image_filename": "",
+            "deleted": False,
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        }])
+
+        self.assertIn("暖色胶片颗粒", SERVER.style_recipe("我的胶片风"))
+        self.assertIn("暖色胶片颗粒", SERVER.style_recipe("旧胶片风"))
+
+    def test_builtin_style_can_be_edited_and_keeps_old_name_alias(self) -> None:
+        original_name = "极简粗线简笔白板风"
+        style_id = SERVER.BUILTIN_STYLE_BY_ID["builtin-minimal-whiteboard"]["id"]
+        self.assertIn("暖白色纯净背景", SERVER.style_recipe(original_name))
+
+        updated = SERVER.update_style(style_id, {
+            "name": "我的白板风",
+            "description": "自定义简介",
+            "recipe": "深蓝纸张背景，细黑线条，低饱和橙色点缀，保留充足留白。",
+        })
+
+        self.assertTrue(updated["builtin"])
+        self.assertEqual(updated["name"], "我的白板风")
+        self.assertIn("深蓝纸张背景", SERVER.style_recipe("我的白板风"))
+        self.assertIn("深蓝纸张背景", SERVER.style_recipe(original_name))
+        self.assertEqual(
+            next(item for item in SERVER.list_styles()["items"] if item["id"] == style_id)["name"],
+            "我的白板风",
+        )
+
+        with self.assertRaisesRegex(SERVER.HTTPException, "不可删除"):
+            SERVER.delete_style(style_id)
 
     def test_snapshot_keeps_reference_summary_private(self) -> None:
         job_id = "reference-snapshot"
@@ -250,6 +330,39 @@ class VoiceLibraryTests(unittest.TestCase):
         self.assertEqual(SERVER.list_voices()["items"], [])
         with self.assertRaises(SERVER.HTTPException):
             SERVER.voice_record(created["id"])
+
+
+class TTSPreprocessingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.pronunciation_path = Path(self.temporary.name) / "pronunciation.yaml"
+        self.pronunciation_path.write_text(
+            "phrases:\n"
+            "  - phrase: 银行\n"
+            "    char: 行\n"
+            "    pinyin: HANG2\n"
+            "  - phrase: 行走\n"
+            "    char: 行\n"
+            "    pinyin: XING2\n",
+            encoding="utf-8",
+        )
+        self.path_patch = mock.patch.object(SERVER, "PRONUNCIATION_PATH", self.pronunciation_path)
+        self.path_patch.start()
+
+    def tearDown(self) -> None:
+        self.path_patch.stop()
+        self.temporary.cleanup()
+
+    def test_preprocesses_only_tts_copy(self) -> None:
+        source = "GPT-5 支持 3-5 个版本，-2 行银行，行走，甲-乙。"
+        expected = "GPT-5 支持 3到5 个版本，负2 行银<行|HANG2>，<行|XING2>走，甲，乙。"
+        self.assertEqual(SERVER.preprocess_tts_text(source), expected)
+
+    def test_synthesis_receives_processed_copy(self) -> None:
+        with mock.patch.object(SERVER, "_synthesize_voice_once") as synthesize:
+            SERVER.synthesize_voice({}, Path("reference.wav"), "GPT-5 和银行", Path("voice.wav"))
+
+        self.assertEqual(synthesize.call_args.args[2], "GPT-5 和银<行|HANG2>")
 
 
 if __name__ == "__main__":

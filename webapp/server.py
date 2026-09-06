@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -27,8 +28,11 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".webapp"
 JOBS_DIR = STATE_DIR / "jobs"
 VOICES_DIR = STATE_DIR / "voices"
+STYLES_DIR = STATE_DIR / "styles"
 CONFIG_PATH = STATE_DIR / "config.json"
 PREFERENCES_PATH = STATE_DIR / "preferences.json"
+STYLES_PATH = STATE_DIR / "styles.json"
+PRONUNCIATION_PATH = ROOT / "pronunciation.yaml"
 PYTHON = Path(sys.executable)
 NODE = shutil.which("node") or "node"
 REMOTION_RENDERER = ROOT / "video_renderer"
@@ -52,6 +56,14 @@ DEFAULT_CONFIG = {
 }
 
 DEFAULT_STYLE = "极简粗线简笔白板风"
+DEFAULT_ASPECT_RATIO = "16:9"
+STYLE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,32}")
+STYLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+ASPECT_RATIO_SPECS: dict[str, dict[str, Any]] = {
+    "16:9": {"width": 16, "height": 9, "image_size": "1536x1024", "canvas_size": (1536, 864)},
+    "9:16": {"width": 9, "height": 16, "image_size": "1024x1536", "canvas_size": (864, 1536)},
+    "1:1": {"width": 1, "height": 1, "image_size": "1024x1024", "canvas_size": (1024, 1024)},
+}
 INFOGRAPHIC_STYLE = "国风动态信息图"
 STYLE_PRESETS = {
     INFOGRAPHIC_STYLE: (
@@ -127,10 +139,213 @@ STYLE_PRESETS = {
 }
 
 
+BUILTIN_STYLE_DEFINITIONS = [
+    {
+        "id": "builtin-infographic",
+        "name": INFOGRAPHIC_STYLE,
+        "description": "知识卡片 · 关系结构 · 国风淡彩",
+        "image_url": "/styles/minimal-whiteboard.webp",
+    },
+    {
+        "id": "builtin-minimal-whiteboard",
+        "name": "极简粗线简笔白板风",
+        "description": "粗黑线 · 少量配色 · 清爽留白",
+        "image_url": "/styles/minimal-whiteboard.webp",
+    },
+    {
+        "id": "builtin-business-doodle",
+        "name": "极简商务涂鸦风",
+        "description": "几何图表 · 蓝绿配色 · 专业克制",
+        "image_url": "/styles/business-doodle.webp",
+    },
+    {
+        "id": "builtin-warm-pencil",
+        "name": "暖米黄素描白板风",
+        "description": "铅笔排线 · 纸张质感 · 温暖细腻",
+        "image_url": "/styles/warm-pencil.webp",
+    },
+    {
+        "id": "builtin-guofeng-flat",
+        "name": "粗线扁平国风卡通",
+        "description": "朱红玉绿 · 国风纹样 · 生动平涂",
+        "image_url": "/styles/guofeng-flat.webp",
+    },
+    {
+        "id": "builtin-viral-pop",
+        "name": "爆款高热吸睛风",
+        "description": "高饱和 · 强对比 · 短视频冲击力",
+        "image_url": "/styles/viral-pop.webp",
+    },
+    {
+        "id": "builtin-black-gold-tech",
+        "name": "黑金科技发布会风",
+        "description": "黑金光效 · 科技舞台 · 高级权威",
+        "image_url": "/styles/black-gold-tech.webp",
+    },
+    {
+        "id": "builtin-healing-journal",
+        "name": "清新治愈手账风",
+        "description": "柔和水彩 · 治愈配色 · 生活手账",
+        "image_url": "/styles/healing-journal.webp",
+    },
+    {
+        "id": "builtin-retro-collage",
+        "name": "复古报纸拼贴风",
+        "description": "撕纸拼贴 · 半色调 · 编辑视觉",
+        "image_url": "/styles/retro-collage.webp",
+    },
+    {
+        "id": "builtin-paper-metaphor",
+        "name": "纸感隐喻拼贴风",
+        "description": "手工剪纸 · 观点隐喻 · 高级克制",
+        "image_url": "/styles/paper-metaphor.png",
+    },
+    {
+        "id": "builtin-oil-visual",
+        "name": "漫画墨线解释风",
+        "description": "漫画墨线 · 半调网点 · 概念机制",
+        "image_url": "/styles/oil-visual.png",
+    },
+    {
+        "id": "builtin-clay-3d",
+        "name": "3D黏土趣味风",
+        "description": "黏土材质 · 玩具比例 · 温暖可爱",
+        "image_url": "/styles/clay-3d.webp",
+    },
+    {
+        "id": "builtin-cyber-neon",
+        "name": "赛博霓虹漫画风",
+        "description": "霓虹青紫 · 漫画速度线 · 未来感",
+        "image_url": "/styles/cyber-neon.webp",
+    },
+]
+BUILTIN_STYLE_BY_ID = {item["id"]: item for item in BUILTIN_STYLE_DEFINITIONS}
+
+
 def style_recipe(style: str) -> str:
-    if style not in STYLE_PRESETS:
-        raise RuntimeError(f"后台未加载画面风格：{style}，请重启后台后重新提交任务")
-    return STYLE_PRESETS[style]
+    for item in load_custom_styles():
+        if item.get("name") == style or style in item.get("aliases", []):
+            return str(item.get("recipe") or "")
+    if style in STYLE_PRESETS:
+        return STYLE_PRESETS[style]
+    raise RuntimeError(f"后台未加载画面风格：{style}，请重启后台后重新提交任务")
+
+
+def normalized_style_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:40]
+
+
+def normalized_style_description(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:100]
+
+
+def normalized_style_recipe(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:2000]
+
+
+def load_custom_styles() -> list[dict[str, Any]]:
+    if not STYLES_PATH.exists():
+        return []
+    try:
+        data = json.loads(STYLES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        style_id = str(item.get("id") or "")
+        name = normalized_style_name(item.get("name"))
+        recipe = normalized_style_recipe(item.get("recipe"))
+        if not STYLE_ID_PATTERN.fullmatch(style_id) or not name or not recipe:
+            continue
+        image_filename = str(item.get("image_filename") or "")
+        if Path(image_filename).name != image_filename:
+            image_filename = ""
+        result.append({
+            "id": style_id,
+            "name": name,
+            "aliases": [normalized_style_name(alias) for alias in item.get("aliases", []) if normalized_style_name(alias)],
+            "description": normalized_style_description(item.get("description")),
+            "recipe": recipe,
+            "image_filename": image_filename,
+            "deleted": bool(item.get("deleted", False)),
+            "builtin": bool(item.get("builtin", False)) and style_id in BUILTIN_STYLE_BY_ID,
+            "created_at": float(item.get("created_at", 0)),
+            "updated_at": float(item.get("updated_at", item.get("created_at", 0))),
+        })
+    return result
+
+
+def save_custom_styles(items: list[dict[str, Any]]) -> None:
+    STATE_DIR.mkdir(exist_ok=True)
+    atomic_write_json(STYLES_PATH, items)
+
+
+def builtin_style_record(definition: dict[str, str]) -> dict[str, Any]:
+    return {
+        "id": definition["id"],
+        "name": definition["name"],
+        "aliases": [],
+        "description": definition["description"],
+        "recipe": STYLE_PRESETS[definition["name"]],
+        "image_filename": "",
+        "deleted": False,
+        "builtin": True,
+        "created_at": 0.0,
+        "updated_at": 0.0,
+    }
+
+
+def builtin_style_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    overrides = {str(item.get("id")): item for item in items if item.get("builtin")}
+    records: list[dict[str, Any]] = []
+    for definition in BUILTIN_STYLE_DEFINITIONS:
+        record = builtin_style_record(definition)
+        override = overrides.get(definition["id"])
+        if override:
+            record.update(override)
+            record["id"] = definition["id"]
+            record["builtin"] = True
+        records.append(record)
+    return records
+
+
+def all_style_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return builtin_style_records(items) + [item for item in items if not item.get("builtin")]
+
+
+def style_name_conflicts(name: str, items: list[dict[str, Any]], exclude_id: str = "") -> bool:
+    return any(
+        candidate.get("id") != exclude_id
+        and (candidate.get("name") == name or name in candidate.get("aliases", []))
+        for candidate in all_style_records(items)
+    )
+
+
+def style_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    image_filename = str(item.get("image_filename") or "")
+    image_path = STYLES_DIR / str(item.get("id")) / image_filename
+    definition = BUILTIN_STYLE_BY_ID.get(str(item.get("id")))
+    image_url = (
+        definition["image_url"]
+        if item.get("builtin") and definition
+        else f"/api/styles/{item.get('id')}/image" if image_filename and image_path.is_file() else "/styles/minimal-whiteboard.webp"
+    )
+    return {
+        "id": str(item.get("id")),
+        "name": normalized_style_name(item.get("name")),
+        "aliases": [normalized_style_name(alias) for alias in item.get("aliases", []) if normalized_style_name(alias)],
+        "description": normalized_style_description(item.get("description")),
+        "recipe": normalized_style_recipe(item.get("recipe")),
+        "builtin": bool(item.get("builtin")),
+        "custom": not bool(item.get("builtin")),
+        "image_url": image_url,
+        "created_at": float(item.get("created_at", 0)),
+        "updated_at": float(item.get("updated_at", item.get("created_at", 0))),
+    }
 
 
 def is_infographic_job(job_id: str) -> bool:
@@ -242,6 +457,7 @@ RENDER_THREADS: set[threading.Thread] = set()
 RENDER_THREADS_LOCK = threading.Lock()
 RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 RUNNING_PROCESSES_LOCK = threading.Lock()
+STYLE_LIBRARY_LOCK = threading.Lock()
 MODEL_CONCURRENCY = 4
 MAX_ACTIVE_AND_QUEUED = 20
 VOICE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".webm"}
@@ -400,6 +616,40 @@ def normalize_output_dir(value: Any, *, create: bool = False) -> str:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def normalize_aspect_ratio(value: Any) -> str:
+    candidate = str(value or "").strip()
+    return candidate if candidate in ASPECT_RATIO_SPECS else DEFAULT_ASPECT_RATIO
+
+
+def aspect_ratio_label(value: Any) -> str:
+    return normalize_aspect_ratio(value)
+
+
+def fit_image_to_aspect(image_path: Path, aspect_ratio: Any) -> None:
+    from PIL import Image
+
+    ratio = normalize_aspect_ratio(aspect_ratio)
+    target_width, target_height = ASPECT_RATIO_SPECS[ratio]["canvas_size"]
+    with Image.open(image_path) as source:
+        source = source.convert("RGB")
+        source_width, source_height = source.size
+        target = target_width / target_height
+        source_ratio = source_width / source_height
+        if source_ratio > target:
+            crop_width = max(1, round(source_height * target))
+            left = max(0, (source_width - crop_width) // 2)
+            source = source.crop((left, 0, left + crop_width, source_height))
+        elif source_ratio < target:
+            crop_height = max(1, round(source_width / target))
+            top = max(0, (source_height - crop_height) // 2)
+            source = source.crop((0, top, source_width, top + crop_height))
+        if source.size != (target_width, target_height):
+            source = source.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        temporary = image_path.with_suffix(image_path.suffix + ".aspect.tmp")
+        source.save(temporary, format="PNG")
+    temporary.replace(image_path)
 
 
 def export_final_video(job_id: str, source: Path) -> str | None:
@@ -1205,7 +1455,7 @@ elements 必须是恰好 3 个具体可画的中文短语，按叙事顺序排�
     return scenes
 
 
-def build_image_prompt(scene: dict[str, Any], style: str) -> str:
+def build_image_prompt(scene: dict[str, Any], style: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO) -> str:
     labels = scene.get("elements") or [scene.get("title", "场景主体")]
     count = len(labels)
     lanes = "；".join(f"第{i + 1}区：{label}" for i, label in enumerate(labels))
@@ -1214,7 +1464,7 @@ def build_image_prompt(scene: dict[str, Any], style: str) -> str:
         if style == OIL_VISUAL_STYLE else
         "同一主角固定为：中国青年男性，短黑发，朴素深色上衣，普通人形象；不要改变年龄与外貌。"
     )
-    return f"""生成一张用于中文口播的 16:9 白板动画分镜原画。
+    return f"""生成一张用于中文口播的 {aspect_ratio_label(aspect_ratio)} 白板动画分镜原画。
 风格名称：{style}。
 视觉配方：{style_recipe(style)}
 必须严格执行这套视觉配方，不得自动改回其他白板风格；人物、物体和配色都要让所选风格一眼可辨。
@@ -1229,12 +1479,13 @@ def build_image_prompt(scene: dict[str, Any], style: str) -> str:
 禁止任何文字、字母、数字、Logo、水印、边框、对话框和装饰性填充。画面底部保留约 16% 空白作为字幕安全区。"""
 
 
-def build_board_prompt(scenes: list[dict[str, Any]], style: str, reference_instruction: str = "", use_character_references: bool = False, infographic: bool = False) -> str:
+def build_board_prompt(scenes: list[dict[str, Any]], style: str, reference_instruction: str = "", use_character_references: bool = False, infographic: bool = False, aspect_ratio: str = DEFAULT_ASPECT_RATIO) -> str:
+    aspect_ratio = aspect_ratio_label(aspect_ratio)
     if infographic:
         scene = scenes[0]
         elements = "、".join(scene.get("illustration_elements") or scene.get("nodes") or [])
         reference_block = f"视觉参考使用规则：{reference_instruction}\n" if reference_instruction else ""
-        return f"""生成一张 16:9 中文知识解说视频的独立插画素材。
+        return f"""生成一张 {aspect_ratio} 中文知识解说视频的独立插画素材。
 所选画面风格：{style}。视觉配方：{style_recipe(style)}
 {reference_block}必须让画面在 3 秒内认出主体、10 秒内看懂观点证据；不是装饰性配图。
 画面只画以下具象内容：{elements}。对应观点：{scene.get('concept', '')}。
@@ -1269,7 +1520,7 @@ PPT 已确定的视觉策略：{scene.get('visual_strategy', '左侧文字，右
         "同一主角固定为：中国青年男性，短黑发，朴素深色上衣，普通人形象；所有分镜中的年龄与外貌保持一致。"
     )
     reference_block = f"参考图说明：\n{reference_instruction}\n" if reference_instruction else ""
-    return f"""{reference_block}生成一张用于中文口播的 16:9 白板动画原画，一张图承载 {len(scenes)} 个连续分镜。
+    return f"""{reference_block}生成一张用于中文口播的 {aspect_ratio} 白板动画原画，一张图承载 {len(scenes)} 个连续分镜。
 风格名称：{style}。
 {style_instruction}
 {character_instruction}
@@ -1280,14 +1531,15 @@ PPT 已确定的视觉策略：{scene.get('visual_strategy', '左侧文字，右
 禁止任何文字、字母、数字、Logo、水印、边框和对话框。画面底部保留约 16% 空白作为字幕安全区。"""
 
 
-def generate_image(config: dict[str, Any], prompt: str, target: Path, reference_images: list[Path] | None = None, job_id: str | None = None) -> None:
+def generate_image(config: dict[str, Any], prompt: str, target: Path, reference_images: list[Path] | None = None, job_id: str | None = None, aspect_ratio: str = DEFAULT_ASPECT_RATIO) -> None:
     # OpenLux documents a 1000-character limit for this GPT Image route.
     compact_prompt = prompt if len(prompt) <= 1000 else f"{prompt[:830]}\n{prompt[-160:]}"
+    aspect_ratio = aspect_ratio_label(aspect_ratio)
     request_payload = {
         "model": config["image_model"],
         "prompt": compact_prompt,
         "n": 1,
-        "size": "1536x1024",
+        "size": ASPECT_RATIO_SPECS[aspect_ratio]["image_size"],
         "quality": "medium",
         "format": "png",
     }
@@ -1389,6 +1641,78 @@ def custom_reference_context(job_id: str) -> tuple[list[Path], str, str]:
     return paths, "\n".join(lines), "；".join(character_descriptions)
 
 
+TTS_PROTECTED_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:\d{4}-\d{1,2}-\d{1,2}|[A-Za-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)+)(?![A-Za-z0-9])"
+)
+TTS_RANGE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<left>\d+(?:\.\d+)?)\s*-\s*(?P<right>\d+(?:\.\d+)?)(?![A-Za-z0-9])"
+)
+TTS_NEGATIVE_PATTERN = re.compile(r"(?<![A-Za-z0-9负])-(?=\d+(?:\.\d+)?)")
+TTS_HYPHEN_PATTERN = re.compile(r"[-‐‑‒–—]")
+
+
+def load_pronunciation_rules() -> list[tuple[str, str, str]]:
+    if not PRONUNCIATION_PATH.exists():
+        return []
+    try:
+        payload = yaml.safe_load(PRONUNCIATION_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"读取 pronunciation.yaml 失败：{exc}") from exc
+    if payload is None:
+        return []
+    entries: Any = payload.get("phrases", []) if isinstance(payload, dict) else payload
+    if isinstance(entries, dict):
+        normalized_entries: list[dict[str, Any]] = []
+        for phrase, value in entries.items():
+            if isinstance(value, dict):
+                normalized_entries.append({"phrase": phrase, **value})
+            else:
+                normalized_entries.append({"phrase": phrase, "pinyin": value})
+        entries = normalized_entries
+    if not isinstance(entries, list):
+        raise RuntimeError("pronunciation.yaml 的 phrases 必须是列表")
+    rules: list[tuple[str, str, str]] = []
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"pronunciation.yaml 第 {index} 条规则格式无效")
+        phrase = str(entry.get("phrase") or entry.get("text") or "").strip()
+        character = str(entry.get("char") or entry.get("character") or "").strip()
+        pinyin = str(entry.get("pinyin") or entry.get("pronunciation") or "").strip().upper()
+        if not phrase or len(character) != 1 or phrase.count(character) != 1:
+            raise RuntimeError(f"pronunciation.yaml 第 {index} 条规则必须指定唯一的 char")
+        if not re.fullmatch(r"[A-ZÜ]+[1-5]", pinyin):
+            raise RuntimeError(f"pronunciation.yaml 第 {index} 条规则的 pinyin 无效：{pinyin}")
+        rules.append((phrase, character, pinyin))
+    return sorted(set(rules), key=lambda item: len(item[0]), reverse=True)
+
+
+def preprocess_tts_text(text: str) -> str:
+    source = str(text or "")
+    if not source:
+        return source
+    protected: dict[str, str] = {}
+
+    def protect_token(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if "-" not in token and not re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", token):
+            return token
+        if not re.search(r"\d", token) and not re.search(r"[A-Z]{2,}", token):
+            return token
+        marker = f"\ue000{len(protected)}\ue001"
+        protected[marker] = token
+        return marker
+
+    result = TTS_PROTECTED_TOKEN_PATTERN.sub(protect_token, source)
+    for phrase, character, pinyin in load_pronunciation_rules():
+        result = result.replace(phrase, phrase.replace(character, f"<{character}|{pinyin}>"))
+    result = TTS_RANGE_PATTERN.sub(r"\g<left>到\g<right>", result)
+    result = TTS_NEGATIVE_PATTERN.sub("负", result)
+    result = TTS_HYPHEN_PATTERN.sub("，", result)
+    for marker, token in protected.items():
+        result = result.replace(marker, token)
+    return result
+
+
 def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, target: Path) -> None:
     if config.get("tts_mode") == "fastapi":
         with httpx.Client(timeout=900) as client, reference.open("rb") as audio:
@@ -1461,10 +1785,11 @@ def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, t
 
 def synthesize_voice(config: dict[str, Any], reference: Path, copy: str, target: Path) -> None:
     """Retry transient LAN failures while keeping TTS concurrency at one."""
+    tts_copy = preprocess_tts_text(copy)
     last_error: Exception | None = None
     for attempt in range(4):
         try:
-            _synthesize_voice_once(config, reference, copy, target)
+            _synthesize_voice_once(config, reference, tts_copy, target)
             return
         except Exception as exc:
             last_error = exc
@@ -1765,7 +2090,15 @@ def _subtitle_video_input(video: Path, subtitles: Path, fallback_target: Path, j
     return fallback_target, None
 
 
-def remotion_infographic_props(scenes: list[dict[str, Any]], style: str, duration_ms: int, subtitles_enabled: bool = False) -> dict[str, Any]:
+def remotion_infographic_props(
+    scenes: list[dict[str, Any]],
+    style: str,
+    duration_ms: int,
+    subtitles_enabled: bool = False,
+    aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+) -> dict[str, Any]:
+    aspect_ratio = normalize_aspect_ratio(aspect_ratio)
+    width, height = ASPECT_RATIO_SPECS[aspect_ratio]["canvas_size"]
     pages: list[dict[str, Any]] = []
     for index, scene in enumerate(scenes, 1):
         timed_cues = scene.get("timed_cues")
@@ -1806,8 +2139,8 @@ def remotion_infographic_props(scenes: list[dict[str, Any]], style: str, duratio
         })
     return {
         "fps": 30,
-        "width": 1920,
-        "height": 1080,
+        "width": width,
+        "height": height,
         "totalDurationMs": duration_ms,
         "totalDurationFrames": max(1, math.ceil(duration_ms * 30 / 1000)),
         "style": style,
@@ -1852,6 +2185,7 @@ def model_stage(job_id: str, copy: str, style: str, reference: Path, scenes_per_
     job_dir = JOBS_DIR / job_id
     try:
         config = load_config()
+        aspect_ratio = normalize_aspect_ratio(JOBS.get(job_id, {}).get("aspect_ratio"))
         voice = job_dir / "voice.wav"
         duration = probe_duration(voice)
         reference_images, reference_instruction, character_context = custom_reference_context(job_id)
@@ -1919,7 +2253,7 @@ def model_stage(job_id: str, copy: str, style: str, reference: Path, scenes_per_
             )
             atomic_write_json(plan_path, scenes)
             atomic_write_json(job_dir / "alignment-report.json", alignment_report)
-            deck_spec = remotion_infographic_props(scenes, style, round(duration * 1000), include_subtitles)
+            deck_spec = remotion_infographic_props(scenes, style, round(duration * 1000), include_subtitles, aspect_ratio)
             atomic_write_json(job_dir / "deck-spec.json", deck_spec)
             atomic_write_json(job_dir / "content-timeline.json", {
                 "schema_version": 1,
@@ -1952,7 +2286,7 @@ def model_stage(job_id: str, copy: str, style: str, reference: Path, scenes_per_
             elif style == OIL_VISUAL_STYLE and not board_images:
                 board_images, board_instruction = oil_visual_reference_context(board, infographic)
                 use_character_references = False
-            board_prompt = build_board_prompt(board, style, board_instruction, use_character_references, infographic)
+            board_prompt = build_board_prompt(board, style, board_instruction, use_character_references, infographic, aspect_ratio)
             board_specs.append((board_images, board_instruction, board_prompt))
         update_job(job_id, duration=duration, scenes=len(scenes), boards=len(boards), checkpoint="plan_done")
         atomic_write_json(job_dir / "boards.json", [
@@ -1973,9 +2307,10 @@ def model_stage(job_id: str, copy: str, style: str, reference: Path, scenes_per_
                 for attempt in range(3):
                     partial_image.unlink(missing_ok=True)
                     try:
-                        generate_image(config, board_prompt, partial_image, board_images, job_id)
+                        generate_image(config, board_prompt, partial_image, board_images, job_id, aspect_ratio)
                         ensure_job_active(job_id)
                         if valid_image_file(partial_image):
+                            fit_image_to_aspect(partial_image, aspect_ratio)
                             break
                         raise RuntimeError("模型返回的图片文件无效")
                     except JobCancelled:
@@ -1991,10 +2326,13 @@ def model_stage(job_id: str, copy: str, style: str, reference: Path, scenes_per_
                 if not valid_image_file(partial_image):
                     raise RuntimeError(f"第 {i} 张分镜图连续 3 次生成无效：{last_image_error}")
                 partial_image.replace(source_image)
+            elif valid_image_file(source_image):
+                fit_image_to_aspect(source_image, aspect_ratio)
             if include_key_text and not infographic:
                 add_key_text(source_image, [str(scene.get("key_text", "")) for scene in board], image)
             else:
                 shutil.copy2(source_image, image)
+            fit_image_to_aspect(image, aspect_ratio)
             update_job(job_id, checkpoint="images", completed_boards=i)
         queue_for_stage(job_id, "render", "准备本地渲染", 78)
         start_render_task(render_generated_job, job_id, scenes, boards, pen_text, include_subtitles, stroke_detail, duration)
@@ -2013,6 +2351,7 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
     job_dir = JOBS_DIR / job_id
     try:
         infographic = is_infographic_job(job_id)
+        aspect_ratio = normalize_aspect_ratio(JOBS.get(job_id, {}).get("aspect_ratio"))
         duration_ms = round(duration * 1000)
         if infographic:
             begin_phase(job_id, "drawing", "Remotion 渲染", "正在按真实旁白时间编排动态信息图", 80)
@@ -2029,6 +2368,7 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
                         str(JOBS.get(job_id, {}).get("style") or DEFAULT_STYLE),
                         duration_ms,
                         include_subtitles,
+                        aspect_ratio,
                     ),
                 )
                 run([
@@ -2052,6 +2392,8 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
                 image = job_dir / f"{stem}.png"
                 annotation = job_dir / f"{stem}.annotation.json"
                 video = job_dir / f"{stem}.mp4"
+                if valid_image_file(image):
+                    fit_image_to_aspect(image, aspect_ratio)
                 expected_ms = sum(int(scene["duration_ms"]) for scene in board)
                 if not valid_timed_video(video, expected_ms):
                     video.unlink(missing_ok=True)
@@ -2108,6 +2450,7 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
 def rerender_job(job_id: str, scenes_per_image: int, pen_text: str, include_key_text: bool, include_subtitles: bool, stroke_detail: str) -> None:
     job_dir = JOBS_DIR / job_id
     try:
+        aspect_ratio = normalize_aspect_ratio(JOBS.get(job_id, {}).get("aspect_ratio"))
         scenes = json.loads((job_dir / "plan.json").read_text(encoding="utf-8"))
         voice = job_dir / "voice.wav"
         duration = probe_duration(voice)
@@ -2126,12 +2469,14 @@ def rerender_job(job_id: str, scenes_per_image: int, pen_text: str, include_key_
             annotation = job_dir / f"{stem}.annotation.json"
             video = job_dir / f"{stem}.mp4"
             if source_image.exists():
+                fit_image_to_aspect(source_image, aspect_ratio)
                 if include_key_text:
                     add_key_text(source_image, [str(scene.get("key_text", "")) for scene in board], image)
                 else:
                     shutil.copy2(source_image, image)
             if not image.exists():
                 raise RuntimeError(f"缺少可复用的分镜图：{image.name}")
+            fit_image_to_aspect(image, aspect_ratio)
             write_board_annotation(board, image, annotation, i)
             expected_ms = sum(int(scene["duration_ms"]) for scene in board)
             if not valid_timed_video(video, expected_ms):
@@ -2243,6 +2588,7 @@ def regenerate_board_image(job_id: str, page: int, prompt: str) -> None:
 
         begin_phase(job_id, "images", "单图重生成", f"正在按修改后的提示词重新生成第 {page} 张图片", 50)
         config = load_config()
+        aspect_ratio = normalize_aspect_ratio(selected.get("aspect_ratio", source.get("aspect_ratio")))
         board = boards[page - 1]
         reference_images, _reference_instruction, _character_context = custom_reference_context(source_id)
         style = str(source.get("style") or DEFAULT_STYLE)
@@ -2259,9 +2605,10 @@ def regenerate_board_image(job_id: str, page: int, prompt: str) -> None:
         for attempt in range(3):
             partial_image.unlink(missing_ok=True)
             try:
-                generate_image(config, prompt, partial_image, reference_images, job_id)
+                generate_image(config, prompt, partial_image, reference_images, job_id, aspect_ratio)
                 ensure_job_active(job_id)
                 if valid_image_file(partial_image):
+                    fit_image_to_aspect(partial_image, aspect_ratio)
                     break
                 raise RuntimeError("模型返回的图片文件无效")
             except JobCancelled:
@@ -2283,12 +2630,14 @@ def regenerate_board_image(job_id: str, page: int, prompt: str) -> None:
             if previous.exists():
                 shutil.copy2(previous, revision_dir / previous.name)
         partial_image.replace(source_image)
+        fit_image_to_aspect(source_image, aspect_ratio)
         include_key_text = bool(selected.get("include_key_text", source.get("include_key_text", True)))
         if include_key_text and not is_infographic_job(job_id):
             from scripts.add_key_text import add_key_text
             add_key_text(source_image, [str(scene.get("key_text", "")) for scene in board], image)
         else:
             shutil.copy2(source_image, image)
+        fit_image_to_aspect(image, aspect_ratio)
 
         try:
             manifest = json.loads(boards_path.read_text(encoding="utf-8")) if boards_path.exists() else []
@@ -2593,6 +2942,136 @@ def save_preferences(payload: dict[str, Any]) -> dict[str, Any]:
     return preferences
 
 
+@app.get("/api/styles")
+def list_styles() -> dict[str, Any]:
+    with STYLE_LIBRARY_LOCK:
+        items = load_custom_styles()
+        visible = [item for item in all_style_records(items) if item.get("builtin") or not item.get("deleted")]
+        return {"items": [style_snapshot(item) for item in visible]}
+
+
+@app.post("/api/styles")
+async def create_style(
+    name: str = Form(""),
+    description: str = Form(""),
+    recipe: str = Form(""),
+    image: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    name = normalized_style_name(name)
+    description = normalized_style_description(description)
+    recipe = normalized_style_recipe(recipe)
+    if len(name) < 2:
+        raise HTTPException(400, "画面风格名称至少需要 2 个字")
+    if len(recipe) < 10:
+        raise HTTPException(400, "画面风格配方至少需要 10 个字")
+    with STYLE_LIBRARY_LOCK:
+        items = load_custom_styles()
+        if style_name_conflicts(name, items):
+            raise HTTPException(409, "画面风格名称已经存在")
+        style_id = uuid.uuid4().hex[:12]
+        style_dir = STYLES_DIR / style_id
+        style_dir.mkdir(parents=True, exist_ok=False)
+        image_filename = ""
+        try:
+            if image is not None:
+                suffix = Path(image.filename or "preview.png").suffix.lower()
+                if suffix not in STYLE_IMAGE_SUFFIXES:
+                    raise HTTPException(400, "风格预览图只支持 PNG、JPG 或 WebP")
+                image_filename = f"preview{suffix}"
+                image_path = style_dir / image_filename
+                with image_path.open("wb") as target:
+                    shutil.copyfileobj(image.file, target)
+                if image_path.stat().st_size > 15 * 1024 * 1024 or not valid_image_file(image_path):
+                    raise HTTPException(400, "风格预览图无效或超过 15MB")
+            now = time.time()
+            item = {
+                "id": style_id,
+                "name": name,
+                "aliases": [],
+                "description": description,
+                "recipe": recipe,
+                "image_filename": image_filename,
+                "deleted": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            items.append(item)
+            save_custom_styles(items)
+        except Exception:
+            shutil.rmtree(style_dir, ignore_errors=True)
+            raise
+    return style_snapshot(item)
+
+
+@app.patch("/api/styles/{style_id}")
+def update_style(style_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not STYLE_ID_PATTERN.fullmatch(style_id):
+        raise HTTPException(404, "画面风格不存在")
+    with STYLE_LIBRARY_LOCK:
+        items = load_custom_styles()
+        item = next((candidate for candidate in items if candidate.get("id") == style_id), None)
+        definition = BUILTIN_STYLE_BY_ID.get(style_id)
+        if item is None and definition:
+            item = builtin_style_record(definition)
+            items.append(item)
+        if item is None:
+            raise HTTPException(404, "画面风格不存在")
+        name = normalized_style_name(payload.get("name", item.get("name")))
+        description = normalized_style_description(payload.get("description", item.get("description")))
+        recipe = normalized_style_recipe(payload.get("recipe", item.get("recipe")))
+        if len(name) < 2 or len(recipe) < 10:
+            raise HTTPException(400, "风格名称或配方长度不符合要求")
+        if style_name_conflicts(name, items, exclude_id=style_id):
+            raise HTTPException(409, "画面风格名称已经存在")
+        old_name = str(item.get("name") or "")
+        aliases = list(item.get("aliases") or [])
+        if old_name and old_name != name and old_name not in aliases:
+            aliases.append(old_name)
+        if definition and definition["name"] != name and definition["name"] not in aliases:
+            aliases.append(definition["name"])
+        item.update(name=name, aliases=aliases, description=description, recipe=recipe, updated_at=time.time())
+        save_custom_styles(items)
+    return style_snapshot(item)
+
+
+@app.delete("/api/styles/{style_id}")
+def delete_style(style_id: str) -> dict[str, Any]:
+    if not STYLE_ID_PATTERN.fullmatch(style_id):
+        raise HTTPException(404, "画面风格不存在")
+    if style_id in BUILTIN_STYLE_BY_ID:
+        raise HTTPException(409, "内置画面风格不可删除，只能编辑")
+    with STYLE_LIBRARY_LOCK:
+        items = load_custom_styles()
+        item = next((candidate for candidate in items if candidate.get("id") == style_id), None)
+        if item is None:
+            raise HTTPException(404, "画面风格不存在")
+        item["deleted"] = True
+        item["updated_at"] = time.time()
+        save_custom_styles(items)
+        shutil.rmtree(STYLES_DIR / style_id, ignore_errors=True)
+    return {"id": style_id, "deleted": True}
+
+
+@app.get("/api/styles/{style_id}/image")
+def get_style_image(style_id: str) -> FileResponse:
+    if not STYLE_ID_PATTERN.fullmatch(style_id):
+        raise HTTPException(404, "画面风格预览图不存在")
+    definition = BUILTIN_STYLE_BY_ID.get(style_id)
+    if definition:
+        image_path = ROOT / "web" / "public" / definition["image_url"].lstrip("/")
+        if not image_path.is_file():
+            raise HTTPException(404, "画面风格预览图不存在")
+        return FileResponse(image_path, media_type=mimetypes.guess_type(image_path.name)[0] or "image/png", filename=image_path.name)
+    item = next((candidate for candidate in load_custom_styles() if candidate.get("id") == style_id), None)
+    if item is None:
+        raise HTTPException(404, "画面风格不存在")
+    filename = str(item.get("image_filename") or "")
+    path = STYLES_DIR / style_id / filename
+    if not filename or Path(filename).name != filename or not path.is_file():
+        raise HTTPException(404, "画面风格没有预览图")
+    return FileResponse(path, media_type=mimetypes.guess_type(filename)[0] or "image/png", filename=filename)
+
+
 @app.get("/api/voices")
 def list_voices() -> dict[str, Any]:
     return {"items": list_voice_snapshots()}
@@ -2670,6 +3149,7 @@ async def create_job(
     request: Request,
     script: str = Form(..., alias="copy"),
     style: str = Form("极简粗线简笔白板风"),
+    aspect_ratio: str = Form(DEFAULT_ASPECT_RATIO),
     scenes_per_image: int = Form(1),
     task_name: str = Form(""),
     pen_text: str = Form(""),
@@ -2769,6 +3249,7 @@ async def create_job(
             shutil.rmtree(job_dir, ignore_errors=True)
             raise HTTPException(400, "风格参考图无效或超过 15MB")
         visual_references = {"style_image": style_path.name, "characters": saved_characters}
+    aspect_ratio = normalize_aspect_ratio(aspect_ratio)
     scenes_per_image = max(1, min(4, scenes_per_image))
     stroke_detail = stroke_detail if stroke_detail in {"light", "standard", "detailed", "full"} else "detailed"
     task_name = normalized_task_name(task_name, script, job_id)
@@ -2779,7 +3260,7 @@ async def create_job(
             "created_at": now, "started_at": now, "timings": {},
             "queue_stage": "voice", "queue_order": time.time_ns(),
             "client_ip": request_client_ip(request),
-            "job_type": "infographic" if reference_mode == "infographic" else "generate", "style": style, "scenes_per_image": scenes_per_image,
+            "job_type": "infographic" if reference_mode == "infographic" else "generate", "style": style, "aspect_ratio": aspect_ratio, "scenes_per_image": scenes_per_image,
             "pipeline_version": PIPELINE_VERSION if reference_mode == "infographic" else "standard_v1",
             "reference_mode": reference_mode, "character_count": len(visual_references.get("characters", [])),
             "voice_id": selected_voice_id, "voice_name": str((selected_voice_metadata or {}).get("name") or ""),
@@ -2933,6 +3414,7 @@ def get_job_parameters(job_id: str) -> dict[str, Any]:
         "copy": str(source.get("copy") or ""),
         "reference_mode": reference_mode,
         "style": str(source.get("style") or DEFAULT_STYLE),
+        "aspect_ratio": normalize_aspect_ratio(selected.get("aspect_ratio", source.get("aspect_ratio"))),
         "scenes_per_image": max(1, min(4, int(source.get("scenes_per_image", 1)))),
         "task_name": str(selected.get("task_name") or source.get("task_name") or ""),
         "pen_text": str(selected.get("pen_text", source.get("pen_text", ""))),
@@ -3117,6 +3599,7 @@ def create_rerender(job_id: str, payload: dict[str, Any], request: Request) -> d
             "queue_stage": "render", "queue_order": time.time_ns(),
             "client_ip": request_client_ip(request),
             "job_type": "rerender", "rerender_of": job_id, "style": source.get("style", ""),
+            "aspect_ratio": normalize_aspect_ratio(source.get("aspect_ratio")),
             "reference_mode": source.get("reference_mode", "standard"),
             "pipeline_version": PIPELINE_VERSION if is_infographic_job(job_id) else source.get("pipeline_version", "standard_v1"),
             "task_name": task_name,
