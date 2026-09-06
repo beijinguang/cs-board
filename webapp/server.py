@@ -2481,6 +2481,31 @@ def get_config() -> dict[str, Any]:
     return safe_config(load_config())
 
 
+@app.post("/api/config/select-output-directory")
+def select_output_directory() -> dict[str, Any]:
+    if sys.platform != "darwin":
+        raise HTTPException(400, "当前系统不支持原生文件夹选择，请手动填写绝对路径")
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", 'POSIX path of (choose folder with prompt "选择视频输出目录")'],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(500, "无法打开 macOS 文件夹选择器") from exc
+    if result.returncode != 0:
+        if "User canceled" in result.stderr or "(-128)" in result.stderr:
+            return {"cancelled": True, "path": ""}
+        raise HTTPException(500, "macOS 文件夹选择器打开失败")
+    try:
+        path = normalize_output_dir(result.stdout, create=False)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"cancelled": False, "path": path}
+
+
 @app.post("/api/config")
 def save_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = load_config()

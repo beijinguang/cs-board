@@ -203,6 +203,21 @@ class QueueResumeTests(unittest.TestCase):
         self.assertEqual(SERVER.VOICE_QUEUE.qsize(), 0)
         self.assertEqual(SERVER.MODEL_QUEUE.qsize(), 1)
 
+    def test_macos_output_directory_picker_returns_selected_path(self) -> None:
+        result = mock.Mock(returncode=0, stdout="/tmp/video-output\n", stderr="")
+        with mock.patch.object(SERVER.sys, "platform", "darwin"), mock.patch.object(SERVER.subprocess, "run", return_value=result) as run:
+            selected = SERVER.select_output_directory()
+
+        self.assertEqual(selected, {"cancelled": False, "path": str(Path("/tmp/video-output").resolve())})
+        run.assert_called_once()
+
+    def test_macos_output_directory_picker_handles_cancel(self) -> None:
+        result = mock.Mock(returncode=1, stdout="", stderr="execution error: User canceled. (-128)")
+        with mock.patch.object(SERVER.sys, "platform", "darwin"), mock.patch.object(SERVER.subprocess, "run", return_value=result):
+            selected = SERVER.select_output_directory()
+
+        self.assertEqual(selected, {"cancelled": True, "path": ""})
+
 
 class VoiceLibraryTests(unittest.TestCase):
     def setUp(self) -> None:

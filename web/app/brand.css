@@ -400,6 +400,21 @@
   line-height: 1.5;
 }
 
+.outputDirPicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.outputDirPicker input {
+  min-width: 0;
+}
+
+.outputDirPicker button {
+  flex: none;
+  white-space: nowrap;
+}
+
 .historyPanel {
   margin-top: 22px;
   padding: 22px 24px;
