@@ -364,6 +364,117 @@ class TTSPreprocessingTests(unittest.TestCase):
 
         self.assertEqual(synthesize.call_args.args[2], "GPT-5 和银<行|HANG2>")
 
+    def test_tts_settings_are_forwarded_to_gradio(self) -> None:
+        reference = Path(self.temporary.name) / "reference.wav"
+        reference.write_bytes(b"reference")
+        generated = Path(self.temporary.name) / "generated.wav"
+        generated.write_bytes(b"generated")
+        client = mock.Mock()
+        client.view_api.return_value = {
+            "named_endpoints": {
+                "/gen_single": {
+                    "parameters": [{
+                        "type": {"enum": ["Same as the voice reference", "Use emotion reference audio", "Use emotion vectors"]},
+                        "parameter_default": "Same as the voice reference",
+                    }]
+                }
+            }
+        }
+        client.submit.return_value.result.return_value = str(generated)
+        config = {
+            "tts_url": "http://127.0.0.1:7860",
+            "tts_mode": "gradio",
+            "tts_emotion_mode": 2,
+            "tts_emotion_weight": 0.4,
+            "tts_emotion_vectors": [0.1] * 8,
+            "tts_emotion_text": "坚定而温暖",
+            "tts_emotion_random": True,
+            "tts_do_sample": False,
+            "tts_top_p": 0.7,
+            "tts_top_k": 12,
+            "tts_temperature": 0.9,
+            "tts_length_penalty": 0.2,
+            "tts_num_beams": 4,
+            "tts_repetition_penalty": 5,
+            "tts_max_mel_tokens": 900,
+            "tts_max_text_tokens_per_segment": 80,
+        }
+        with mock.patch.object(SERVER, "Client", return_value=client), mock.patch.object(SERVER, "handle_file", return_value="reference-file"):
+            SERVER._synthesize_voice_once(config, reference, "测试文本", Path(self.temporary.name) / "voice.wav")
+
+        arguments = client.submit.call_args.args
+        self.assertEqual(arguments[0], "Use emotion vectors")
+        self.assertEqual(arguments[5], 0.4)
+        self.assertEqual(list(arguments[6:14]), [0.1] * 8)
+        self.assertEqual(arguments[14:16], ("坚定而温暖", True))
+        self.assertEqual(arguments[16:26], (80, 1.0, False, 0.7, 12, 0.9, 0.2, 4, 5, 900))
+
+
+class LibraryPaginationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.original_voices_dir = SERVER.VOICES_DIR
+        self.original_styles_dir = SERVER.STYLES_DIR
+        self.original_styles_path = SERVER.STYLES_PATH
+        SERVER.VOICES_DIR = Path(self.temporary.name) / "voices"
+        SERVER.STYLES_DIR = Path(self.temporary.name) / "styles"
+        SERVER.STYLES_PATH = Path(self.temporary.name) / "styles.json"
+        SERVER.JOBS_DIR = Path(self.temporary.name) / "jobs"
+        SERVER.JOBS = {}
+        self.media_patch = mock.patch.object(SERVER, "valid_media_file", return_value=True)
+        self.media_patch.start()
+
+    def tearDown(self) -> None:
+        self.media_patch.stop()
+        SERVER.VOICES_DIR = self.original_voices_dir
+        SERVER.STYLES_DIR = self.original_styles_dir
+        SERVER.STYLES_PATH = self.original_styles_path
+        self.temporary.cleanup()
+
+    def test_voice_search_and_pagination_return_metadata(self) -> None:
+        for name in ("女声旁白", "男声旁白", "环境音"):
+            upload = SERVER.UploadFile(file=io.BytesIO(b"test audio"), filename=f"{name}.wav")
+            asyncio.run(SERVER.create_voice(name, upload))
+
+        result = SERVER.list_voices(search="旁白", page=2, page_size=1)
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["pages"], 2)
+        self.assertEqual(result["page"], 2)
+        self.assertEqual(len(result["items"]), 1)
+
+    def test_style_search_and_detail_include_all_persisted_fields(self) -> None:
+        result = SERVER.list_styles(search="白板", page=1, page_size=1)
+
+        self.assertGreater(result["total"], 0)
+        item = result["items"][0]
+        self.assertIn("image_filename", item)
+        self.assertIn("deleted", item)
+        self.assertIn("type", item)
+        self.assertIn("updated_at", item)
+
+    def test_history_search_and_pagination_return_metadata(self) -> None:
+        for index, task_name in enumerate(("课程开场", "产品介绍", "课程结尾"), 1):
+            SERVER.JOBS[f"job-{index:02d}"] = {
+                "id": f"job-{index:02d}",
+                "status": "done",
+                "stage": "已完成",
+                "progress": 100,
+                "created_at": float(index),
+                "started_at": float(index),
+                "task_name": task_name,
+                "copy": task_name,
+                "style": "极简粗线简笔白板风",
+                "timings": {},
+            }
+
+        result = SERVER.list_jobs(search="课程", page=2, page_size=1)
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["pages"], 2)
+        self.assertEqual(result["page"], 2)
+        self.assertEqual(result["items"][0]["task_name"], "课程开场")
+
 
 if __name__ == "__main__":
     unittest.main()

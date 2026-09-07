@@ -11,6 +11,8 @@ __pycache__/
 *.py[cod]
 
 # Web dependencies and build output
+/build/
+/dist/
 web/node_modules/
 web/.next/
 web/.vinext/

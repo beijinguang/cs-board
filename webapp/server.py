@@ -24,8 +24,10 @@ from fastapi.responses import FileResponse
 from gradio_client import Client, handle_file
 
 
-ROOT = Path(__file__).resolve().parents[1]
-STATE_DIR = ROOT / ".webapp"
+ROOT = Path(os.environ.get("CS_BOARD_ROOT", Path(__file__).resolve().parents[1])).expanduser().resolve()
+STATE_DIR = Path(
+    os.environ.get("CS_BOARD_STATE_DIR", str(ROOT / ".webapp"))
+).expanduser().resolve()
 JOBS_DIR = STATE_DIR / "jobs"
 VOICES_DIR = STATE_DIR / "voices"
 STYLES_DIR = STATE_DIR / "styles"
@@ -34,7 +36,7 @@ PREFERENCES_PATH = STATE_DIR / "preferences.json"
 STYLES_PATH = STATE_DIR / "styles.json"
 PRONUNCIATION_PATH = ROOT / "pronunciation.yaml"
 PYTHON = Path(sys.executable)
-NODE = shutil.which("node") or "node"
+NODE = os.environ.get("CS_BOARD_NODE", shutil.which("node") or "node")
 REMOTION_RENDERER = ROOT / "video_renderer"
 HAND = ROOT / "assets" / "drawing-hand-clean.png"
 PIPELINE_VERSION = "narrated_deck_v8_oil_visual"
@@ -52,6 +54,20 @@ DEFAULT_CONFIG = {
     "tts_url": "http://127.0.0.1:7860",
     "tts_url_2": "",
     "tts_mode": "gradio",
+    "tts_emotion_mode": 0,
+    "tts_emotion_weight": 0.65,
+    "tts_emotion_vectors": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "tts_emotion_text": "",
+    "tts_emotion_random": False,
+    "tts_do_sample": True,
+    "tts_top_p": 0.8,
+    "tts_top_k": 30,
+    "tts_temperature": 0.8,
+    "tts_length_penalty": 0.0,
+    "tts_num_beams": 3,
+    "tts_repetition_penalty": 10.0,
+    "tts_max_mel_tokens": 1500,
+    "tts_max_text_tokens_per_segment": 120,
     "output_dir": "",
 }
 
@@ -340,8 +356,11 @@ def style_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "aliases": [normalized_style_name(alias) for alias in item.get("aliases", []) if normalized_style_name(alias)],
         "description": normalized_style_description(item.get("description")),
         "recipe": normalized_style_recipe(item.get("recipe")),
+        "image_filename": image_filename,
+        "deleted": bool(item.get("deleted", False)),
         "builtin": bool(item.get("builtin")),
         "custom": not bool(item.get("builtin")),
+        "type": "内置风格" if item.get("builtin") else "自定义风格",
         "image_url": image_url,
         "created_at": float(item.get("created_at", 0)),
         "updated_at": float(item.get("updated_at", item.get("created_at", 0))),
@@ -573,7 +592,7 @@ def fit_scene_durations(scenes: list[dict[str, Any]], audio_duration: float) -> 
 def load_config() -> dict[str, Any]:
     STATE_DIR.mkdir(exist_ok=True)
     if not CONFIG_PATH.exists():
-        return DEFAULT_CONFIG.copy()
+        return normalize_tts_config(DEFAULT_CONFIG.copy())
     data = DEFAULT_CONFIG.copy()
     stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     # Do not migrate the former Volcengine credential into OpenLux. A key must
@@ -589,7 +608,7 @@ def load_config() -> dict[str, Any]:
         data["output_dir"] = normalize_output_dir(data.get("output_dir", ""))
     except (ValueError, OSError):
         data["output_dir"] = ""
-    return data
+    return normalize_tts_config(data)
 
 
 def safe_config(data: dict[str, Any]) -> dict[str, Any]:
@@ -598,6 +617,71 @@ def safe_config(data: dict[str, Any]) -> dict[str, Any]:
     result["api_key"] = "" if not key else f"{key[:4]}••••{key[-4:]}"
     result["has_api_key"] = bool(key)
     return result
+
+
+def normalize_tts_config(data: dict[str, Any]) -> dict[str, Any]:
+    result = data.copy()
+
+    def number(key: str, fallback: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(result.get(key, fallback))
+        except (TypeError, ValueError):
+            value = fallback
+        return max(minimum, min(maximum, value))
+
+    try:
+        mode = int(result.get("tts_emotion_mode", 0))
+    except (TypeError, ValueError):
+        mode = 0
+    result["tts_emotion_mode"] = max(0, min(3, mode))
+    result["tts_emotion_weight"] = number("tts_emotion_weight", 0.65, 0.0, 1.0)
+    raw_vectors = result.get("tts_emotion_vectors", [])
+    vectors = raw_vectors if isinstance(raw_vectors, list) else []
+    result["tts_emotion_vectors"] = [number_from_value(v, 0.0, -1.0, 1.0) for v in (vectors + [0.0] * 8)[:8]]
+    result["tts_emotion_text"] = str(result.get("tts_emotion_text", "") or "").strip()[:120]
+    def boolean(key: str, fallback: bool) -> bool:
+        value = result.get(key, fallback)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off", ""}:
+                return False
+        return bool(value) if value is not None else fallback
+
+    result["tts_emotion_random"] = boolean("tts_emotion_random", False)
+    result["tts_do_sample"] = boolean("tts_do_sample", True)
+    result["tts_top_p"] = number("tts_top_p", 0.8, 0.0, 1.0)
+    try:
+        result["tts_top_k"] = max(0, min(1000, int(result.get("tts_top_k", 30))))
+    except (TypeError, ValueError):
+        result["tts_top_k"] = 30
+    result["tts_temperature"] = number("tts_temperature", 0.8, 0.0, 2.0)
+    result["tts_length_penalty"] = number("tts_length_penalty", 0.0, -2.0, 2.0)
+    try:
+        result["tts_num_beams"] = max(1, min(20, int(result.get("tts_num_beams", 3))))
+    except (TypeError, ValueError):
+        result["tts_num_beams"] = 3
+    result["tts_repetition_penalty"] = number("tts_repetition_penalty", 10.0, 0.0, 20.0)
+    try:
+        result["tts_max_mel_tokens"] = max(100, min(10000, int(result.get("tts_max_mel_tokens", 1500))))
+    except (TypeError, ValueError):
+        result["tts_max_mel_tokens"] = 1500
+    try:
+        result["tts_max_text_tokens_per_segment"] = max(20, min(500, int(result.get("tts_max_text_tokens_per_segment", 120))))
+    except (TypeError, ValueError):
+        result["tts_max_text_tokens_per_segment"] = 120
+    return result
+
+
+def number_from_value(value: Any, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = fallback
+    return max(minimum, min(maximum, number))
 
 
 def normalize_output_dir(value: Any, *, create: bool = False) -> str:
@@ -1714,11 +1798,31 @@ def preprocess_tts_text(text: str) -> str:
 
 
 def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, target: Path) -> None:
-    if config.get("tts_mode") == "fastapi":
+    tts_config = normalize_tts_config(config)
+    if tts_config.get("tts_mode") == "fastapi":
         with httpx.Client(timeout=900) as client, reference.open("rb") as audio:
             response = client.post(
-                f"{config['tts_url'].rstrip('/')}/api/tts",
-                data={"text": copy, "emo_weight": "0.65"},
+                f"{tts_config['tts_url'].rstrip('/')}/api/tts",
+                data={
+                    "text": copy,
+                    "emo_control_method": str(tts_config["tts_emotion_mode"]),
+                    "emo_weight": str(tts_config["tts_emotion_weight"]),
+                    **{
+                        f"vec{index}": str(value)
+                        for index, value in enumerate(tts_config["tts_emotion_vectors"], 1)
+                    },
+                    "emo_text": tts_config["tts_emotion_text"],
+                    "emo_random": str(tts_config["tts_emotion_random"]).lower(),
+                    "do_sample": str(tts_config["tts_do_sample"]).lower(),
+                    "top_p": str(tts_config["tts_top_p"]),
+                    "top_k": str(tts_config["tts_top_k"]),
+                    "temperature": str(tts_config["tts_temperature"]),
+                    "length_penalty": str(tts_config["tts_length_penalty"]),
+                    "num_beams": str(tts_config["tts_num_beams"]),
+                    "repetition_penalty": str(tts_config["tts_repetition_penalty"]),
+                    "max_mel_tokens": str(tts_config["tts_max_mel_tokens"]),
+                    "max_text_tokens_per_segment": str(tts_config["tts_max_text_tokens_per_segment"]),
+                },
                 files={"voice": (reference.name, audio, "audio/wav")},
             )
             if response.is_error:
@@ -1728,17 +1832,22 @@ def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, t
 
     # Long-form cloning can keep the GPU busy for several minutes.  The
     # default Gradio HTTP read timeout is too short and abandons a healthy job.
-    client = Client(config["tts_url"], verbose=False, httpx_kwargs={"timeout": 1800.0})
-    emotion_control_method = "Same as the voice reference"
+    client = Client(tts_config["tts_url"], verbose=False, httpx_kwargs={"timeout": 1800.0})
+    emotion_control_method = "与音色参考音频相同"
     try:
         api_info = client.view_api(return_format="dict", print_info=False)
         endpoint = api_info.get("named_endpoints", {}).get("/gen_single", {})
         parameter = (endpoint.get("parameters") or [])[0]
         choices = parameter.get("type", {}).get("enum") or []
         candidates = [
+            choices[tts_config["tts_emotion_mode"]]
+            if tts_config["tts_emotion_mode"] < len(choices)
+            else None,
             parameter.get("parameter_default"),
             parameter.get("example_input"),
             choices[0] if choices else None,
+            "与音色参考音频相同",
+            "Same as the voice reference",
         ]
         emotion_control_method = next(
             value for value in candidates if isinstance(value, str) and value
@@ -1746,9 +1855,14 @@ def _synthesize_voice_once(config: dict[str, Any], reference: Path, copy: str, t
     except (AttributeError, IndexError, KeyError, StopIteration, TypeError, ValueError):
         pass
     job = client.submit(
-        emotion_control_method, handle_file(str(reference)), copy, "ZH", None, 0.65,
-        0, 0, 0, 0, 0, 0, 0, 0, "", False, 120, 1.0,
-        True, 0.8, 30, 0.8, 0.0, 3, 10.0, 1500,
+        emotion_control_method, handle_file(str(reference)), copy, "ZH", None,
+        tts_config["tts_emotion_weight"], *tts_config["tts_emotion_vectors"],
+        tts_config["tts_emotion_text"], tts_config["tts_emotion_random"],
+        tts_config["tts_max_text_tokens_per_segment"], 1.0,
+        tts_config["tts_do_sample"], tts_config["tts_top_p"],
+        tts_config["tts_top_k"], tts_config["tts_temperature"],
+        tts_config["tts_length_penalty"], tts_config["tts_num_beams"],
+        tts_config["tts_repetition_penalty"], tts_config["tts_max_mel_tokens"],
         api_name="/gen_single",
     )
     result = job.result(timeout=1800)
@@ -2873,6 +2987,7 @@ def save_config(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         if value not in (None, ""):
             current[key] = value
+    current = normalize_tts_config(current)
     STATE_DIR.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     ensure_pipeline_workers()
@@ -2942,12 +3057,55 @@ def save_preferences(payload: dict[str, Any]) -> dict[str, Any]:
     return preferences
 
 
+def paginate_items(
+    items: list[dict[str, Any]],
+    *,
+    search: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    needle = str(search or "").strip().casefold()
+    filtered = items
+    if needle:
+        filtered = [
+            item
+            for item in items
+            if needle in " ".join(
+                str(item.get(field, ""))
+                if not isinstance(item.get(field), list)
+                else " ".join(str(value) for value in item.get(field, []))
+                for field in fields
+            ).casefold()
+        ]
+    size = max(1, min(100, int(page_size or 20)))
+    total = len(filtered)
+    pages = max(1, math.ceil(total / size))
+    current_page = max(1, min(pages, int(page or 1)))
+    start = (current_page - 1) * size
+    return {
+        "items": filtered[start : start + size],
+        "search": str(search or ""),
+        "page": current_page,
+        "page_size": size,
+        "total": total,
+        "pages": pages,
+    }
+
+
 @app.get("/api/styles")
-def list_styles() -> dict[str, Any]:
+def list_styles(search: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
     with STYLE_LIBRARY_LOCK:
         items = load_custom_styles()
         visible = [item for item in all_style_records(items) if item.get("builtin") or not item.get("deleted")]
-        return {"items": [style_snapshot(item) for item in visible]}
+        snapshots = [style_snapshot(item) for item in visible]
+        return paginate_items(
+            snapshots,
+            search=search,
+            page=page,
+            page_size=page_size,
+            fields=("id", "name", "aliases", "description", "recipe", "type"),
+        )
 
 
 @app.post("/api/styles")
@@ -3073,8 +3231,14 @@ def get_style_image(style_id: str) -> FileResponse:
 
 
 @app.get("/api/voices")
-def list_voices() -> dict[str, Any]:
-    return {"items": list_voice_snapshots()}
+def list_voices(search: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
+    return paginate_items(
+        list_voice_snapshots(),
+        search=search,
+        page=page,
+        page_size=page_size,
+        fields=("id", "name", "filename", "content_type"),
+    )
 
 
 @app.post("/api/voices")
@@ -3279,10 +3443,22 @@ async def create_job(
 
 
 @app.get("/api/jobs")
-def list_jobs(limit: int = 20) -> dict[str, Any]:
+def list_jobs(
+    limit: int = 20,
+    search: str = "",
+    page: int = 1,
+    page_size: int | None = None,
+) -> dict[str, Any]:
     with LOCK:
-        ids = sorted(JOBS, key=lambda item: float(JOBS[item].get("created_at", 0)), reverse=True)[:max(1, min(100, limit))]
-    return {"items": [job_snapshot(job_id) for job_id in ids]}
+        ids = sorted(JOBS, key=lambda item: float(JOBS[item].get("created_at", 0)), reverse=True)
+    snapshots = [job_snapshot(job_id) for job_id in ids if job_id in JOBS]
+    return paginate_items(
+        snapshots,
+        search=search,
+        page=page,
+        page_size=page_size if page_size is not None else limit,
+        fields=("id", "task_name", "copy", "style", "status", "stage", "error", "voice_name"),
+    )
 
 
 @app.delete("/api/jobs/{job_id}")
