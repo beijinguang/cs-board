@@ -206,6 +206,91 @@ class RegionStreamRenderer:
         selected = out[:self.max_skeleton_strokes] if self.max_skeleton_strokes else out
         return sr._order_skeleton_strokes(selected)
 
+    def _skeleton_entity_groups(
+        self, strokes: list[list[tuple[int, int]]], allowed: np.ndarray
+    ) -> list[tuple[list[list[tuple[int, int]]], np.ndarray]]:
+        """按墨线横向密度把一张分镜拆成连续绘制的视觉实体组。"""
+        if len(strokes) <= 1:
+            return [(strokes, allowed)]
+        density = (self.ink_pixels & allowed).sum(axis=0).astype(np.float32)
+        if not density.any():
+            return [(strokes, allowed)]
+        sigma = max(6.0, min(self.out_w, self.out_h) / 24.0)
+        smooth = cv2.GaussianBlur(density.reshape(1, -1), (0, 0), sigmaX=sigma).ravel()
+        window = max(8, round(sigma * 1.5))
+        candidates = [
+            index
+            for index in range(window, self.out_w - window)
+            if smooth[index] >= smooth[index - window:index + window + 1].max()
+            and smooth[index] >= smooth.max() * 0.32
+        ]
+        min_distance = max(28, round(self.out_w * 0.065))
+        peaks: list[int] = []
+        if len(candidates) >= 4:
+            edge_candidates = [
+                candidate for candidate in candidates if candidate < self.out_w * 0.30
+            ]
+            if edge_candidates:
+                peaks.append(max(edge_candidates, key=lambda item: float(smooth[item])))
+            edge_candidates = [
+                candidate for candidate in candidates if candidate > self.out_w * 0.70
+            ]
+            if edge_candidates:
+                peaks.append(max(edge_candidates, key=lambda item: float(smooth[item])))
+        for index in sorted(candidates, key=lambda item: float(smooth[item]), reverse=True):
+            if index not in peaks and all(abs(index - peak) >= min_distance for peak in peaks):
+                peaks.append(index)
+            if len(peaks) >= 5:
+                break
+        peaks.sort()
+        if len(peaks) <= 1:
+            return [(strokes, allowed)]
+
+        groups: list[list[list[tuple[int, int]]]] = [[] for _ in peaks]
+        for stroke in strokes:
+            center_x = sum(point[0] for point in stroke) / len(stroke)
+            group_index = min(range(len(peaks)), key=lambda index: abs(peaks[index] - center_x))
+            groups[group_index].append(stroke)
+        groups = [sr._order_skeleton_strokes(group) for group in groups if group]
+        if len(groups) <= 1:
+            return [(strokes, allowed)]
+
+        centers = [
+            sum(point[0] for stroke in group for point in stroke)
+            / sum(len(stroke) for stroke in group)
+            for group in groups
+        ]
+        masks: list[np.ndarray] = []
+        for index, group in enumerate(groups):
+            left = 0 if index == 0 else round((centers[index - 1] + centers[index]) / 2)
+            right = self.out_w if index == len(groups) - 1 else round((centers[index] + centers[index + 1]) / 2)
+            mask = np.zeros_like(allowed)
+            mask[:, left:right] = allowed[:, left:right]
+            masks.append(mask)
+        return list(zip(groups, masks))
+
+    @staticmethod
+    def _allocate_group_frames(weights: list[int], total_frames: int) -> list[int]:
+        if not weights or total_frames <= 0:
+            return [0 for _ in weights]
+        if len(weights) == 1:
+            return [total_frames]
+        total_weight = sum(weights)
+        allocations = [total_frames * weight // total_weight for weight in weights]
+        for index in range(len(allocations)):
+            if allocations[index] == 0 and total_frames >= len(weights):
+                allocations[index] = 1
+        while sum(allocations) > total_frames:
+            index = max(range(len(allocations)), key=lambda item: allocations[item])
+            if allocations[index] <= 1:
+                break
+            allocations[index] -= 1
+        index = 0
+        while sum(allocations) < total_frames:
+            allocations[index % len(allocations)] += 1
+            index += 1
+        return allocations
+
     # ── 落墨（限制在 allowed 内）──
     def _reveal_ink_segment(self, a: tuple[int, int], b: tuple[int, int], allowed: np.ndarray) -> None:
         seg = np.zeros((self.out_h, self.out_w), dtype=np.uint8)
@@ -413,18 +498,40 @@ class RegionStreamRenderer:
                 if cfg.ink_path_mode == "skeleton":
                     strokes = self._region_skeleton_strokes(allowed)
                     if strokes:
-                        samples, pen_lifts = [], set()
-                        for si, stroke in enumerate(strokes):
-                            if si > 0:
-                                pen_lifts.add(len(samples))
-                            samples.extend(stroke)
-                        self._lay_ink(writer, ink_frames, samples, pen_lifts, allowed, sync_color=True)
-                        centers = samples
+                        groups = self._skeleton_entity_groups(strokes, allowed)
+                        animation_frames = ink_frames + color_frames
+                        weights = [sum(len(stroke) for stroke in group) for group, _ in groups]
+                        group_frames = self._allocate_group_frames(weights, animation_frames)
+                        ratio = ink_frames / max(1, animation_frames)
+                        for (group, group_allowed), group_total in zip(groups, group_frames):
+                            if group_total <= 0:
+                                continue
+                            group_ink_frames = round(group_total * ratio)
+                            if group_total >= 2:
+                                group_ink_frames = min(group_total - 1, max(1, group_ink_frames))
+                            group_color_frames = group_total - group_ink_frames
+                            samples, pen_lifts = [], set()
+                            for stroke_index, stroke in enumerate(group):
+                                if stroke_index > 0:
+                                    pen_lifts.add(len(samples))
+                                samples.extend(stroke)
+                            self._lay_ink(
+                                writer,
+                                group_ink_frames,
+                                samples,
+                                pen_lifts,
+                                group_allowed,
+                                sync_color=True,
+                            )
+                            self._wash_contour(writer, group_color_frames, group_allowed)
+                            cur_ms += group_total * ms_per_frame
                     else:
-                        # 骨架识别不到可靠线条时不让手沿网格乱扫；细节交给无手上色阶段。
                         for _ in range(ink_frames):
                             writer.write(self.drawn.astype(np.uint8))
-                        centers = []
+                        self._wash_contour(writer, color_frames, allowed)
+                        cur_ms += (ink_frames + color_frames) * ms_per_frame
+                    fill_static(start_ms + dur_ms)
+                    continue
                 else:
                     path = self._region_grid_path(allowed)
                     if path:
