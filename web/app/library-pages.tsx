@@ -1,7 +1,6 @@
 "use client";
 
 import {FormEvent, useEffect, useState} from "react";
-import Link from "next/link";
 
 const API = process.env.NEXT_PUBLIC_API_BASE || "";
 const PAGE_SIZE = 8;
@@ -89,7 +88,8 @@ const emotionModes = [
 const vectorLabels = ["喜", "怒", "哀", "惧", "厌恶", "低落", "惊喜", "平静"];
 
 function imageSource(path: string) {
-  return path.startsWith("http") ? path : `${API}${path}`;
+  if (path.startsWith("http") || path.startsWith("/styles/")) return path;
+  return API ? `${API}${path}` : path;
 }
 
 function formatDate(value?: number) {
@@ -115,15 +115,15 @@ export function LibraryPageShell({
   return (
     <main className="libraryShell">
       <header className="libraryTopbar">
-        <Link className="libraryBrand" href="/">
+        <a className="libraryBrand" href="/">
           <span className="brandMark"><img src="/brand-mark.png" alt="" /></span>
           <span>有温度出品</span>
-        </Link>
+        </a>
         <nav className="libraryNav" aria-label="页面导航">
-          <Link href="/">制作台</Link>
-          <Link href="/voices">音色库</Link>
-          <Link href="/styles">画风库</Link>
-          <Link href="/tts">IndexTTS 设置</Link>
+          <a href="/">制作台</a>
+          <a href="/voices">音色库</a>
+          <a href="/styles">画风库</a>
+          <a href="/tts">IndexTTS 设置</a>
         </nav>
       </header>
       <section className="libraryHero">

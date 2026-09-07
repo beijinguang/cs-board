@@ -68,6 +68,24 @@ class QueueResumeTests(unittest.TestCase):
     def test_explicit_task_name_is_preserved(self) -> None:
         self.assertEqual(SERVER.normalized_task_name("  我的任务  ", "备用文案", "job-test"), "我的任务")
 
+    def test_normalize_standard_scene_count_merges_small_over_split(self) -> None:
+        candidate = [
+            {"title": f"场景 {index}", "concept": f"概念 {index}", "elements": [f"元素 {index}"]}
+            for index in range(69)
+        ]
+
+        normalized = SERVER.normalize_standard_scene_count(candidate, 67)
+
+        self.assertEqual(len(normalized), 67)
+        self.assertIn("场景", normalized[0]["title"])
+        self.assertIn("元素", normalized[-1]["elements"][0])
+
+    def test_normalize_standard_scene_count_rejects_large_over_split(self) -> None:
+        candidate = [{"title": f"场景 {index}"} for index in range(80)]
+
+        with self.assertRaisesRegex(RuntimeError, "返回 80 幕，预期 67 幕"):
+            SERVER.normalize_standard_scene_count(candidate, 67)
+
     def test_aspect_ratio_specs_are_normalized_and_prompted(self) -> None:
         self.assertEqual(SERVER.normalize_aspect_ratio("9:16"), "9:16")
         self.assertEqual(SERVER.normalize_aspect_ratio("4:3"), "16:9")

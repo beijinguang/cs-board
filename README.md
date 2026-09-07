@@ -139,6 +139,8 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .venv/bin/python -m pip i
 ./start-webapp.sh
 ```
 
+网页版与 macOS DMG 使用相同的本地端口（`13000` 和 `18765`），启动网页版前请先退出 **CSBoard.app**；启动脚本会检测端口占用并给出提示，不会误连接到 DMG 的服务。
+
 脚本会启动前后端并打开 [http://127.0.0.1:13000/](http://127.0.0.1:13000/)。如果系统没有自动打开浏览器，也可以手动访问该地址。动态信息图首次运行时会按当前平台准备 Remotion 与 Whisper.cpp 所需资源。macOS 14 及更低版本可以启动界面和 API，但当前 Remotion 版本的视频渲染不保证成功。
 
 ### 首次配置

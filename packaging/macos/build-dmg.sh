@@ -70,6 +70,7 @@ rsync -a "$ROOT/video_renderer/" "$APP_ROOT/video_renderer/" \
   --exclude '.cache' \
   --exclude 'dist'
 rsync -a "$ROOT/web/dist/" "$APP_ROOT/web/dist/"
+rsync -a "$ROOT/web/public/" "$APP_ROOT/web/public/"
 rsync -a "$ROOT/web/node_modules/" "$APP_ROOT/web/node_modules/" \
   --exclude '.cache'
 cp "$ROOT/web/package.json" "$APP_ROOT/web/package.json"

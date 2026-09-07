@@ -367,6 +367,15 @@ def style_snapshot(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def builtin_style_image_path(definition: dict[str, str]) -> Path | None:
+    relative_path = definition["image_url"].lstrip("/")
+    candidates = (
+        ROOT / "web" / "public" / relative_path,
+        ROOT / "web" / "dist" / "client" / relative_path,
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
 def is_infographic_job(job_id: str) -> bool:
     item = JOBS.get(job_id, {})
     return (
@@ -1224,6 +1233,59 @@ def split_script(copy: str, target_count: int) -> list[str]:
     return groups
 
 
+def _merge_scene_pair(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(first)
+    first_title = str(first.get("title") or "").strip()
+    second_title = str(second.get("title") or "").strip()
+    if second_title and second_title != first_title:
+        merged["title"] = "；".join(value for value in (first_title, second_title) if value)[:40]
+
+    first_concept = str(first.get("concept") or "").strip()
+    second_concept = str(second.get("concept") or "").strip()
+    if second_concept and second_concept != first_concept:
+        merged["concept"] = "；".join(value for value in (first_concept, second_concept) if value)[:120]
+
+    elements: list[str] = []
+    for scene in (first, second):
+        raw_elements = scene.get("elements") or []
+        if not isinstance(raw_elements, list):
+            raw_elements = [raw_elements]
+        for element in raw_elements:
+            label = str(element.get("label") or "") if isinstance(element, dict) else str(element)
+            label = label.strip()
+            if label and label not in elements:
+                elements.append(label)
+    if elements:
+        merged["elements"] = elements[:4]
+
+    for field in ("visual_structure", "metaphor"):
+        if not merged.get(field) and second.get(field):
+            merged[field] = second[field]
+    return merged
+
+
+def normalize_standard_scene_count(candidate: list[dict[str, Any]], expected_count: int) -> list[dict[str, Any]]:
+    if len(candidate) <= expected_count:
+        return candidate
+    excess = len(candidate) - expected_count
+    allowed_excess = max(3, expected_count // 10)
+    if excess > allowed_excess:
+        raise RuntimeError(f"分镜模型返回 {len(candidate)} 幕，预期 {expected_count} 幕")
+
+    candidate_count = len(candidate)
+    normalized: list[dict[str, Any]] = []
+    for output_index in range(expected_count):
+        start = int(output_index * candidate_count / expected_count + 0.5)
+        end = int((output_index + 1) * candidate_count / expected_count + 0.5)
+        end = max(start + 1, end)
+        group = candidate[start:end]
+        merged = dict(group[0])
+        for scene in group[1:]:
+            merged = _merge_scene_pair(merged, scene)
+        normalized.append(merged)
+    return normalized
+
+
 def scene_limit_for_duration(duration: float) -> int:
     """Duration is a ceiling only: never exceed eight scenes per minute."""
     return max(1, int(max(0.0, duration) * 8 / 60))
@@ -1499,10 +1561,12 @@ elements 必须是恰好 3 个具体可画的中文短语，按叙事顺序排�
             candidate = parse_json_block(extract_response_text(payload))
             if not isinstance(candidate, list) or not candidate:
                 raise RuntimeError("分镜模型未返回有效场景")
-            if not infographic and len(candidate) != scene_count:
-                raise RuntimeError(f"分镜模型返回 {len(candidate)} 幕，预期 {scene_count} 幕")
             if not all(isinstance(scene, dict) for scene in candidate):
                 raise RuntimeError("分镜模型返回的数据结构无效")
+            if not infographic:
+                if len(candidate) < scene_count:
+                    raise RuntimeError(f"分镜模型返回 {len(candidate)} 幕，预期 {scene_count} 幕")
+                candidate = normalize_standard_scene_count(candidate, scene_count)
             if infographic:
                 if len(candidate) > requested_count:
                     raise RuntimeError(f"信息图页面超过上限 {requested_count}")
@@ -3216,10 +3280,15 @@ def get_style_image(style_id: str) -> FileResponse:
         raise HTTPException(404, "画面风格预览图不存在")
     definition = BUILTIN_STYLE_BY_ID.get(style_id)
     if definition:
-        image_path = ROOT / "web" / "public" / definition["image_url"].lstrip("/")
-        if not image_path.is_file():
+        image_path = builtin_style_image_path(definition)
+        if image_path is None:
             raise HTTPException(404, "画面风格预览图不存在")
-        return FileResponse(image_path, media_type=mimetypes.guess_type(image_path.name)[0] or "image/png", filename=image_path.name)
+        return FileResponse(
+            image_path,
+            media_type=mimetypes.guess_type(image_path.name)[0] or "image/png",
+            filename=image_path.name,
+            content_disposition_type="inline",
+        )
     item = next((candidate for candidate in load_custom_styles() if candidate.get("id") == style_id), None)
     if item is None:
         raise HTTPException(404, "画面风格不存在")
@@ -3227,7 +3296,12 @@ def get_style_image(style_id: str) -> FileResponse:
     path = STYLES_DIR / style_id / filename
     if not filename or Path(filename).name != filename or not path.is_file():
         raise HTTPException(404, "画面风格没有预览图")
-    return FileResponse(path, media_type=mimetypes.guess_type(filename)[0] or "image/png", filename=filename)
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(filename)[0] or "image/png",
+        filename=filename,
+        content_disposition_type="inline",
+    )
 
 
 @app.get("/api/voices")
@@ -3624,7 +3698,14 @@ def get_job_input_asset(job_id: str, filename: str) -> FileResponse:
     path = JOBS_DIR / job_id / filename
     if not path.is_file():
         raise HTTPException(404, "素材不存在")
-    return FileResponse(path, media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream", filename=filename)
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    disposition = "inline" if media_type.startswith("image/") else "attachment"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type=disposition,
+    )
 
 
 @app.get("/api/jobs/{job_id}/gallery")
