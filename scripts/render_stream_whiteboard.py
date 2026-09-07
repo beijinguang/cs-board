@@ -242,7 +242,7 @@ class RegionStreamRenderer:
 
     # ── 起笔段（骨架模式）：沿笔迹逐段揭原图墨迹，无块填充 ──
     def _lay_ink(self, writer, frames: int, samples: list[tuple[int, int]],
-                 pen_lifts: set[int], allowed: np.ndarray) -> None:
+                 pen_lifts: set[int], allowed: np.ndarray, sync_color: bool = False) -> None:
         if frames <= 0:
             return
         n = len(samples)
@@ -251,6 +251,7 @@ class RegionStreamRenderer:
                 writer.write(self._snapshot_with_tip(self.out_w // 2, self.out_h // 2))
             return
         idx_for_frame = _frame_progress_indices(n, frames)
+        color_disk = sr._feathered_disk(self.cfg.brush_radius) if sync_color else None
         last: int | None = None
         for si in idx_for_frame:
             if last is None:
@@ -260,6 +261,11 @@ class RegionStreamRenderer:
                     if k in pen_lifts:
                         continue
                     self._reveal_ink_segment(samples[k - 1], samples[k], allowed)
+                    if color_disk is not None:
+                        self._color_stamp(*samples[k], color_disk, allowed)
+            if color_disk is not None:
+                self._color_stamp(*samples[si], color_disk, allowed)
+                self._reveal_ink_segment(samples[si], samples[si], allowed)
             sx, sy = samples[si]
             # 换笔时可以瞬移到下一条线，但显示时笔尖始终落在真实骨架坐标上。
             writer.write(self._snapshot_with_tip(sx, sy))
@@ -338,6 +344,8 @@ class RegionStreamRenderer:
             cx = max(0, min(region_w - 1, cx))
             col = np.where(reveal[:, cx])[0]
             cy = int(col[-1]) if col.size > 0 else 0
+            if fi == frames - 1:
+                drawn_crop[allowed_crop] = color_crop[allowed_crop]
             writer.write(self.drawn.astype(np.uint8))
 
         # 收尾：确保区域内允许像素全部揭示
@@ -398,9 +406,9 @@ class RegionStreamRenderer:
                 fill_static(start_ms)
 
                 allowed = self._allowed_mask(element, elements[idx + 1:])
-                # 混合绘制：手只负责约 32% 的主轮廓，细节无手淡入，剩余时间观看成图。
-                ink_frames = max(1, round(dur_ms * 0.32 * cfg.fps / 1000))
-                color_frames = max(1, round(dur_ms * 0.10 * cfg.fps / 1000))
+                # 混合绘制：手沿主轮廓移动时同步落色，剩余内容再用轮廓扫描补全。
+                ink_frames = max(1, round(dur_ms * 0.52 * cfg.fps / 1000))
+                color_frames = max(1, round(dur_ms * 0.28 * cfg.fps / 1000))
 
                 if cfg.ink_path_mode == "skeleton":
                     strokes = self._region_skeleton_strokes(allowed)
@@ -410,7 +418,7 @@ class RegionStreamRenderer:
                             if si > 0:
                                 pen_lifts.add(len(samples))
                             samples.extend(stroke)
-                        self._lay_ink(writer, ink_frames, samples, pen_lifts, allowed)
+                        self._lay_ink(writer, ink_frames, samples, pen_lifts, allowed, sync_color=True)
                         centers = samples
                     else:
                         # 骨架识别不到可靠线条时不让手沿网格乱扫；细节交给无手上色阶段。
@@ -422,7 +430,7 @@ class RegionStreamRenderer:
                     if path:
                         samples, pen_lifts, sample_cell = self._grid_plan(path)
                         # 块填充：随笔尖推进逐格铺满（保证文字/大块实心）
-                        self._lay_ink_grid(writer, ink_frames, samples, pen_lifts, sample_cell, path, allowed)
+                        self._lay_ink_grid(writer, ink_frames, samples, pen_lifts, sample_cell, path, allowed, sync_color=True)
                         centers = [self._cell_center(c) for c in path]
                     else:
                         self._lay_ink(writer, ink_frames, [], set(), None, allowed)
@@ -435,11 +443,6 @@ class RegionStreamRenderer:
                 else:
                     self._wash_brush(writer, color_frames, centers, allowed)
                 cur_ms += color_frames * ms_per_frame
-                # The last part of each board is a clean hold on the complete
-                # generated image. This guarantees that even a short final
-                # narration segment ends on the finished artwork.
-                if idx == len(elements) - 1:
-                    self.drawn[...] = self.color_img.astype(np.float32)
                 fill_static(start_ms + dur_ms)
 
             # Never extend a board past its allocated narration time. The old
@@ -452,7 +455,7 @@ class RegionStreamRenderer:
         return raw_path
 
     # 网格起笔专用：带块填充，笔尖与揭墨同步
-    def _lay_ink_grid(self, writer, frames: int, samples, pen_lifts, sample_cell, path, allowed) -> None:
+    def _lay_ink_grid(self, writer, frames: int, samples, pen_lifts, sample_cell, path, allowed, sync_color: bool = False) -> None:
         if frames <= 0:
             return
         n = len(samples)
@@ -461,6 +464,7 @@ class RegionStreamRenderer:
                 writer.write(self._snapshot_with_tip(self.out_w // 2, self.out_h // 2))
             return
         idx_for_frame = _frame_progress_indices(n, frames)
+        color_disk = sr._feathered_disk(self.cfg.brush_radius) if sync_color else None
         cells_done = 0
         last: int | None = None
         for si in idx_for_frame:
@@ -471,10 +475,15 @@ class RegionStreamRenderer:
                     if k in pen_lifts:
                         continue
                     self._reveal_ink_segment(samples[k - 1], samples[k], allowed)
+                    if color_disk is not None:
+                        self._color_stamp(*samples[k], color_disk, allowed)
             target_cell = sample_cell[si]
             while cells_done <= target_cell and cells_done < len(path):
                 self._ink_stamp_cell(path[cells_done], allowed)
                 cells_done += 1
+            if color_disk is not None:
+                self._color_stamp(*samples[si], color_disk, allowed)
+                self._reveal_ink_segment(samples[si], samples[si], allowed)
             sx, sy = samples[si]
             writer.write(self._snapshot_with_tip(sx, sy))
             last = si
