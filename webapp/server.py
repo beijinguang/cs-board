@@ -2578,7 +2578,7 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
                     partial_video = job_dir / f"{stem}.partial.mp4"
                     partial_video.unlink(missing_ok=True)
                     write_board_annotation(board, image, annotation, i)
-                    run([str(PYTHON), str(ROOT / "scripts" / "render_stream_whiteboard.py"), str(image), str(annotation), str(partial_video), str(hand_asset), "--ink-path", "skeleton", "--stroke-detail", stroke_detail, "--color-fill", "contour-wipe"], job_id=job_id)
+                    run([str(PYTHON), str(ROOT / "scripts" / "render_stream_whiteboard.py"), str(image), str(annotation), str(partial_video), str(hand_asset), "--ink-path", "skeleton", "--stroke-detail", stroke_detail, "--color-fill", "paint", "--keep-raw"], job_id=job_id)
                     if not valid_media_file(partial_video):
                         raise RuntimeError(f"第 {i} 段手绘视频无效")
                     partial_video.replace(video)
@@ -2613,7 +2613,7 @@ def render_generated_job(job_id: str, scenes: list[dict[str, Any]], boards: list
             ffmpeg_command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", video_input.name, "-i", "voice.wav", "-map", "0:v:0", "-map", "1:a:0"]
             if subtitle_filter:
                 ffmpeg_command.extend(["-vf", subtitle_filter])
-            ffmpeg_command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", partial_final.name])
+            ffmpeg_command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "19", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", partial_final.name])
             run(ffmpeg_command, cwd=job_dir, job_id=job_id)
             if not valid_media_file(partial_final):
                 raise RuntimeError("最终音画文件无效")
@@ -2661,7 +2661,7 @@ def rerender_job(job_id: str, scenes_per_image: int, pen_text: str, include_key_
                 video.unlink(missing_ok=True)
                 partial_video = job_dir / f"{stem}.partial.mp4"
                 partial_video.unlink(missing_ok=True)
-                run([str(PYTHON), str(ROOT / "scripts" / "render_stream_whiteboard.py"), str(image), str(annotation), str(partial_video), str(hand_asset), "--ink-path", "skeleton", "--stroke-detail", stroke_detail, "--color-fill", "contour-wipe"], job_id=job_id)
+                run([str(PYTHON), str(ROOT / "scripts" / "render_stream_whiteboard.py"), str(image), str(annotation), str(partial_video), str(hand_asset), "--ink-path", "skeleton", "--stroke-detail", stroke_detail, "--color-fill", "paint", "--keep-raw"], job_id=job_id)
                 if not valid_media_file(partial_video):
                     raise RuntimeError(f"第 {i} 段重新渲染视频无效")
                 partial_video.replace(video)
@@ -2695,7 +2695,7 @@ def rerender_job(job_id: str, scenes_per_image: int, pen_text: str, include_key_
             ffmpeg_command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", video_input.name, "-i", "voice.wav", "-map", "0:v:0", "-map", "1:a:0"]
             if subtitle_filter:
                 ffmpeg_command.extend(["-vf", subtitle_filter])
-            ffmpeg_command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", partial_final.name])
+            ffmpeg_command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "19", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", partial_final.name])
             run(ffmpeg_command, cwd=job_dir, job_id=job_id)
             if not valid_media_file(partial_final):
                 raise RuntimeError("重新渲染的最终音画文件无效")

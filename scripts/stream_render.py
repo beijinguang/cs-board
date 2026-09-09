@@ -87,6 +87,11 @@ class Config:
     # < light_fpc 内容密集、时长紧张 → 不停顿。
     pause_heavy_fpc: float = 0.7
     pause_light_fpc: float = 0.4
+    # ── 笔画级人手节奏 ──
+    stroke_pause_ratio_heavy: float = 0.10
+    stroke_pause_ratio_light: float = 0.04
+    stroke_pause_max_frames: int = 3
+    stroke_turn_weight: float = 0.75
     # ── 笔迹路径模式 ──
     # ink_path_mode: "grid" 网格格中心插值(默认) | "skeleton" 骨架级像素追踪
     ink_path_mode: str = "grid"
