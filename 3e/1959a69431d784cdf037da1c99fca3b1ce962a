@@ -1,0 +1,37 @@
+webapp/server.py
+  s_4c94d774362a27::t_e2c430179ddb07 15,1683,1692,3101-3143
+web/app/image-generator/page.module.css
+  s_4c94d774362a27::t_279f8a0233b772 10
+web/app/image-generator/page.tsx
+  s_4c94d774362a27::t_84f7b8e5e9839c 7-137
+  s_4c94d774362a27::t_85ac36776c62c9 231-232
+web/app/page.tsx
+  s_4c94d774362a27::t_279f8a0233b772 60
+  s_4c94d774362a27::t_b14694c35389ea 94,96
+.gitignore
+  s_db9baffa58e3d0::t_46361ebdee2126 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "3e1959a69431d784cdf037da1c99fca3b1ce962a",
+  "prompts": {},
+  "sessions": {
+    "s_4c94d774362a27": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a089e7-bf3b-71c3-aeb2-09903124145a",
+        "model": "GPT-5.6-Luna-joybuilder"
+      },
+      "human_author": "wangjinguang6 <beijinguang@users.noreply.github.com>"
+    },
+    "s_db9baffa58e3d0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0bd64-460a-7980-9d5a-5cf24ccaf065",
+        "model": "GPT-6-Astra-joybuilder"
+      },
+      "human_author": "wangjinguang6 <beijinguang@users.noreply.github.com>"
+    }
+  }
+}
