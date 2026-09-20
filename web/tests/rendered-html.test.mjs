@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+async function render(path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/", {
+    new Request(`http://localhost${path}`, {
       headers: { accept: "text/html" },
     }),
     {
@@ -51,4 +51,13 @@ test("keeps public defaults portable and free of local configuration", async () 
   assert.match(layout, /title:\s*"有温度出品"/);
   assert.match(packageJson, /"build": "vinext build"/);
   assert.match(packageJson, /"test": "npm run build/);
+});
+
+test("server-renders the standalone image lab", async () => {
+  const response = await render("/image-generator");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /IMAGE LAB/);
+  assert.match(html, /STYLE LIBRARY/);
+  assert.match(html, /API 设置同步/);
 });

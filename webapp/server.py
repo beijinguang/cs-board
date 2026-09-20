@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1679,7 +1680,7 @@ PPT 已确定的视觉策略：{scene.get('visual_strategy', '左侧文字，右
 禁止任何文字、字母、数字、Logo、水印、边框和对话框。画面底部保留约 16% 空白作为字幕安全区。"""
 
 
-def generate_image(config: dict[str, Any], prompt: str, target: Path, reference_images: list[Path] | None = None, job_id: str | None = None, aspect_ratio: str = DEFAULT_ASPECT_RATIO) -> None:
+def generate_image(config: dict[str, Any], prompt: str, target: Path, reference_images: list[Path] | None = None, job_id: str | None = None, aspect_ratio: str = DEFAULT_ASPECT_RATIO, quality: str = "medium") -> None:
     # OpenLux documents a 1000-character limit for this GPT Image route.
     compact_prompt = prompt if len(prompt) <= 1000 else f"{prompt[:830]}\n{prompt[-160:]}"
     aspect_ratio = aspect_ratio_label(aspect_ratio)
@@ -1688,7 +1689,7 @@ def generate_image(config: dict[str, Any], prompt: str, target: Path, reference_
         "prompt": compact_prompt,
         "n": 1,
         "size": ASPECT_RATIO_SPECS[aspect_ratio]["image_size"],
-        "quality": "medium",
+        "quality": quality if quality in {"low", "medium", "high", "xhigh", "max"} else "medium",
         "format": "png",
     }
     if reference_images:
@@ -3095,6 +3096,51 @@ def test_config(payload: dict[str, Any]) -> dict[str, Any]:
     results["tts_nodes"] = tts_results
     results["tts"] = {"ok": tts_ok, "message": "；".join(str(item["message"]) for item in tts_results) or "未配置语音节点"}
     return results
+
+
+@app.post("/api/image-generate")
+def generate_standalone_image(payload: dict[str, Any]) -> dict[str, Any]:
+    prompt = str(payload.get("prompt") or "").strip()
+    style_name = str(payload.get("style_name") or "").strip()
+    style_recipe = str(payload.get("style_recipe") or "").strip()
+    aspect_ratio = normalize_aspect_ratio(payload.get("aspect_ratio"))
+    quality = str(payload.get("quality") or "medium").strip()
+    if not prompt:
+        raise HTTPException(400, "请先输入画面描述")
+    if len(prompt) > 4000:
+        raise HTTPException(400, "提示词最多 4000 个字符")
+    if len(style_recipe) > 3000:
+        raise HTTPException(400, "画风配方过长")
+    if quality not in {"medium", "high"}:
+        raise HTTPException(400, "图片质量选项不受支持")
+
+    config = load_config()
+    if not config.get("api_key"):
+        raise HTTPException(400, "请先在 API 设置中填写 OpenLux API Key")
+    complete_prompt = (
+        f"{prompt}\n\nVisual style direction{f' ({style_name})' if style_name else ''}: {style_recipe}"
+        if style_recipe
+        else prompt
+    )
+    with tempfile.TemporaryDirectory(prefix="image-lab-", dir=str(STATE_DIR)) as directory:
+        target = Path(directory) / "generated.png"
+        try:
+            generate_image(config, complete_prompt, target, aspect_ratio=aspect_ratio, quality=quality)
+        except ProviderHTTPError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, str(exc)) from exc
+        if not target.is_file():
+            raise HTTPException(502, "图片服务没有返回图像文件")
+        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+
+    return {
+        "image": f"data:image/png;base64,{encoded}",
+        "model": str(config.get("image_model") or "gpt-image-2"),
+        "style_name": style_name or None,
+        "aspect_ratio": aspect_ratio,
+        "quality": quality,
+    }
 
 
 @app.get("/api/preferences")
