@@ -1,0 +1,21 @@
+README.md
+  s_db9baffa58e3d0::t_83b8e6a9975918 57,63-88
+  s_db9baffa58e3d0::t_96f4e8d42d130c 109
+  s_db9baffa58e3d0::t_cbea4a1690acf8 27-35,52-56,58-62,89-108,110-123,244,292-293,337
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "d3a320e26d65bc5043c4a548924e28bfb1807c73",
+  "prompts": {},
+  "sessions": {
+    "s_db9baffa58e3d0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0bd64-460a-7980-9d5a-5cf24ccaf065",
+        "model": "GPT-6-Astra-joybuilder"
+      },
+      "human_author": "wangjinguang6 <beijinguang@users.noreply.github.com>"
+    }
+  }
+}
